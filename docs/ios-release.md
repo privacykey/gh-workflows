@@ -115,6 +115,54 @@ may fetch, but it may not move off the committed pins.
 No `export_options_path` here: the workflow generates a minimal
 automatic-signing plist (`method` + `teamID` + `destination: export`).
 
+### Fastlane mode (`use_fastlane: true`)
+
+Orthogonal to the signing mode: the repo's fastlane lanes replace the
+inline `xcodebuild` invocations, and everything around them — preflight,
+xcodegen, the SPM drift gates, the `ios-signing` environment gate,
+keychain/ASC-key setup, artefact uploads, the TestFlight upload, and
+signing-material cleanup — is identical in both modes. With
+`use_fastlane: false` (the default) nothing changes.
+
+Repo prerequisites:
+
+- Committed `Gemfile` + `Gemfile.lock` containing the `fastlane` gem —
+  Ruby is set up with `ruby/setup-ruby` (`bundler-cache: true`), which
+  installs from the lockfile.
+- A Ruby version declared where `ruby/setup-ruby` can find it:
+  `.ruby-version`, `.tool-versions`, or the Gemfile's `ruby` line.
+- `fastlane/Fastfile` defining both lanes.
+
+What each job runs:
+
+- **validate** — `bundle exec fastlane <fastlane_test_lane>` (default
+  lane name `test`) replaces the unsigned Release build and the
+  `run_tests` / `test_script` invocation; those inputs apply to the
+  non-fastlane path only. If the lane writes
+  `build/TestResults/Tests.xcresult`, that bundle is uploaded as the
+  test artefact.
+- **archive** — `bundle exec fastlane <fastlane_archive_lane>` (default
+  lane name `archive`) replaces the `xcodebuild archive` /
+  `-exportArchive` steps.
+
+Archive lane contract:
+
+| Direction | Contract |
+|---|---|
+| reads (env) | `KEYCHAIN_PATH`, `APPLE_SIGNING_IDENTITY`, `APPLE_API_KEY_PATH`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`, `EXPORT_METHOD`, `BUILD_NUMBER` |
+| writes | `build/export/<name>.ipa` — verified, uploaded as the IPA artefact, and what the TestFlight upload sends |
+| writes | `build/<scheme>.xcarchive` — dSYMs are zipped from it (a missing archive degrades to the no-dSYMs warning) |
+
+Env notes: `KEYCHAIN_PATH` and `APPLE_API_KEY_PATH` are empty in
+`runner-keychain` mode (the signing material already lives on the
+runner); `BUILD_NUMBER` is empty with `build_number: project`, meaning
+leave `CURRENT_PROJECT_VERSION` alone. The export-options resolution
+still runs, but its plist is not passed to the lane — the lane owns its
+export options and receives the `export_method` input as
+`EXPORT_METHOD`. With `spm_resolved_path` set, the drift gates apply to
+the lanes too: a lane that moves the committed pins fails the
+post-archive check.
+
 ### Secrets by mode (names only)
 
 | Secret | `runner-keychain` | `import` |
@@ -124,8 +172,9 @@ automatic-signing plist (`method` + `teamID` + `destination: export`).
 | `APPLE_API_KEY` (`.p8` PEM) | never read — the `.p8` lives on the runner | required |
 | `APPLE_API_KEY_ID` | only when `upload_to_testflight` | required |
 | `APPLE_API_ISSUER` | only when `upload_to_testflight` | required |
+| `APPLE_SIGNING_IDENTITY` (common-name string) | only exported to the fastlane archive lane; optional | only exported to the fastlane archive lane; optional |
 
-All five are declared `required: false` at the `workflow_call` level and
+All are declared `required: false` at the `workflow_call` level and
 enforced at runtime per mode, with fail-closed errors. Scope them to the
 `ios-signing` environment and call with `secrets: inherit` (same
 resolution rule as `macos-signing` — environment secrets only resolve
@@ -170,7 +219,10 @@ Full list and semantics in the workflow header.
 | `build_number` | `auto` | Minutes-since-epoch scheme; `project` leaves `CURRENT_PROJECT_VERSION` alone; integer forces |
 | `signed_archive` | `true` | `false` runs only the secret-free validate job |
 | `upload_to_testflight` | `false` | `altool --upload-app` with ASC API-key auth |
-| `run_tests` / `test_script` | `false` / empty | Validate-job tests + xcresult artefact; default off for repos whose unit tests run in separate CI |
+| `run_tests` / `test_script` | `false` / empty | Validate-job tests + xcresult artefact; default off for repos whose unit tests run in separate CI; non-fastlane path only |
+| `use_fastlane` | `false` | Lanes replace the inline `xcodebuild` invocations; see "Fastlane mode" above |
+| `fastlane_test_lane` | `test` | Validate-job lane in fastlane mode |
+| `fastlane_archive_lane` | `archive` | Archive-job lane in fastlane mode; env/output contract above |
 | `spm_resolved_path` | empty | Package.resolved drift gate + `-onlyUsePackageVersionsFromResolvedFile` |
 | `ipa_retention_days` | `14` | dSYM artefact is always 365 days |
 
