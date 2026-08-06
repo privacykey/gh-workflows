@@ -1,10 +1,8 @@
 name: macOS app CI (reusable)
 
 # Reusable push/PR pipeline: unsigned build + tests, no secrets of any
-# kind. Generalised from BananaBlitz's ci.yml (the only Sparkle repo that
-# had a dedicated CI workflow). Release builds — signing, notarization,
-# DMG, appcast — live in macos-sparkle-release.yml and are triggered by
-# `v*` tag pushes.
+# kind. Release builds — signing, notarization, DMG, appcast — live in
+# macos-sparkle-release.yml and are triggered by `v*` tag pushes.
 #
 # Consumer usage:
 #
@@ -104,9 +102,7 @@ jobs:
 
       - name: Build & test
         # CODE_SIGNING_ALLOWED=NO — CI has no signing identity and needs
-        # none. (BananaBlitz's `| xcpretty || (showdestinations; exit 1)`
-        # decoration was dropped: it obscured the real failure and
-        # xcpretty adds nothing the xcresult bundle doesn't carry.)
+        # none.
         env:
           XCODEPROJ: ${{ inputs.xcodeproj }}
           SCHEME: ${{ inputs.scheme }}

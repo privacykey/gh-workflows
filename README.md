@@ -1,8 +1,7 @@
 # gh-workflows
 
 Reusable GitHub Actions workflows and composite actions for the privacykey
-macOS app portfolio. One pipeline, one place to fix it — instead of five
-copy-pasted `release.yml`s at three generations of drift.
+macOS app portfolio. One pipeline, one place to fix it.
 
 ## Contents
 
@@ -84,11 +83,11 @@ locally). The workflow invokes it with:
 - **writes:** `dist/<app>-<version>.dmg` (signed + notarized + stapled),
   optionally `symbols/<app>-<version>.app.dSYM.zip`
 
-FrameSplash's `scripts/release.sh` is the reference implementation
-(xcodebuild archive → export → notarytool submit --wait → staple →
-hdiutil DMG → codesign + notarize + staple the DMG).
+A typical implementation: xcodebuild archive → export → notarytool
+submit --wait → staple → hdiutil DMG → codesign + notarize + staple the
+DMG.
 
-### Homebrew cask updates (PR-based — the org standard)
+### Homebrew cask updates (PR-based)
 
 When `cask_name`, `tap_repo`, and the `HOMEBREW_TAP_TOKEN` secret are all
 set, the release job:
@@ -110,9 +109,8 @@ the step skips cleanly and the rest of the release is unaffected.
 
 Token requirements: `HOMEBREW_TAP_TOKEN` must be a fine-grained PAT
 scoped to **only** the tap repo, with **Contents: read & write** *and*
-**Pull requests: read & write**. The Pull-requests permission is new with
-the PR flow — tokens minted for the old direct-push flow only carried
-Contents and will fail at `gh pr create` until reissued.
+**Pull requests: read & write**. A token that only carries Contents
+fails at `gh pr create`.
 
 ## Using the CI workflow
 
@@ -141,8 +139,8 @@ if a repo needs something custom.
 
 ## Secret names: gen-1 → gen-3 mapping
 
-Repos that predate the current secret scheme (BananaBlitz) use gen-1 names.
-Same *values* where noted — mostly this is a rename plus swapping Apple-ID
+Repos that predate the current secret scheme use gen-1 names. Same
+*values* where noted — mostly this is a rename plus swapping Apple-ID
 notarization for an App Store Connect API key.
 
 | gen-1 (old) | gen-3 (this repo) | Migration |
@@ -163,63 +161,28 @@ Why the ASC API key beats Apple-ID + app-specific password: revocable
 per-key in one click, immune to Apple ID 2FA prompts, and org-shareable
 without sharing an account.
 
-## Migration checklist per consumer repo
+## Migrating a consumer repo
 
-### BananaBlitz (gen-1 → gen-3, biggest jump)
+Repo-specific migration steps live in each consumer repo's migration PR.
+The generic sequence:
 
-- [ ] Mint an ASC API key; add `APPLE_API_KEY`, `APPLE_API_KEY_ID`,
-      `APPLE_API_ISSUER` secrets.
-- [ ] Rename `APPLE_DEVELOPER_ID_CERT` → `APPLE_CERTIFICATE`,
-      `APPLE_DEVELOPER_ID_PASSWORD` → `APPLE_CERTIFICATE_PASSWORD`; add
-      `APPLE_SIGNING_IDENTITY`.
-- [ ] Delete `APPLE_NOTARY_USER` / `APPLE_NOTARY_PASSWORD` /
-      `APPLE_NOTARY_TEAM_ID` once the new flow is proven.
-- [ ] Create the `macos-signing` environment; move `SPARKLE_PRIVATE_KEY`
-      into it; add a required-reviewers rule.
-- [ ] Update `Scripts/release.sh` to the env contract above (it currently
-      reads `APPLE_NOTARY_*` and probes the keychain for the identity;
-      switch notarytool to `--key/--key-id/--issuer`, honour
-      `KEYCHAIN_PATH` via `codesign --keychain`).
-- [ ] Replace `release.yml` with the ~15-line caller; pass
-      `release_script: ./Scripts/release.sh` (capital S) and
-      `uses_xcodegen: true`.
-- [ ] Replace `ci.yml` with the `macos-app-ci.yml` caller.
-- [ ] Gone for free: the unpinned `brew install --cask sparkle` is replaced
-      by the pinned, checksummed tarball install.
-
-### FrameSplash (gen-3 reference — mostly deletion)
-
-- [ ] Replace `.github/workflows/release.yml` with the caller; pass
-      `uses_xcodegen: true`, `cask_name: framesplash`,
-      `tap_repo: adamxbot/homebrew-tap`.
-- [ ] Keep `scripts/release.sh` (it already honours the contract);
-      `scripts/generate-appcast.sh` can be deleted once the built-in
-      appcast path is proven (or kept and wired via `appcast_script`).
-- [ ] Add a CI caller for `macos-app-ci.yml` (FrameSplash has no push/PR
-      workflow today — tests only run at release time).
-- [ ] Verify `HOMEBREW_TAP_TOKEN` is set if the tap step should run, and
-      that the PAT carries **Pull requests: read & write** in addition to
-      Contents — the shared workflow uses the PR-based tap flow, not
-      FrameSplash's old direct push to the tap default branch.
-- [ ] Adjust the release routine: after each release, a
-      `release/<cask_name>-<version>` PR appears in the tap — **merging it
-      is the cask publish step** (`brew upgrade --cask` sees the version
-      only after merge).
-
-### privacycommand (gen-3, minor deltas)
-
-- [ ] Replace `.github/workflows/release.yml` with the caller;
-      `uses_xcodegen: false` (project is committed), no cask inputs.
-- [ ] Set `publish_dsym: true` to keep its current behaviour of attaching
-      the dSYM to the public Release (or accept the new default `false`,
-      which keeps symbols private — recommended).
-- [ ] Its old keychain step lacked `-T /usr/bin/codesign` and
-      `set-key-partition-list` (it worked because its script signs via
-      xcodebuild only); the shared keychain action adds both — no repo
-      change needed, headless `codesign` invocations now also work.
-- [ ] Update `scripts/release.sh` to pass `--keychain "$KEYCHAIN_PATH"`
-      to any direct `codesign` calls (env var is already provided).
-- [ ] Add a CI caller for `macos-app-ci.yml`.
+1. Mint an App Store Connect API key; add `APPLE_API_KEY`,
+   `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`. Rename any gen-1 secrets per
+   the mapping table above.
+2. Create the `macos-signing` environment; move `SPARKLE_PRIVATE_KEY`
+   into it; add a required-reviewers rule.
+3. Bring the repo's release script onto the env contract above
+   (notarytool `--key/--key-id/--issuer`; honour `KEYCHAIN_PATH` via
+   `codesign --keychain` on any direct `codesign` calls).
+4. Replace `release.yml` with the ~15-line caller (`secrets: inherit`)
+   and `ci.yml` with the `macos-app-ci.yml` caller.
+5. If the app ships a Homebrew cask: add the
+   `packaging/homebrew/<cask_name>.rb` template, set `cask_name` /
+   `tap_repo`, and mint a `HOMEBREW_TAP_TOKEN` PAT (Contents *and* Pull
+   requests, read & write). After each release, merging the tap PR is
+   the cask publish step.
+6. Retire the gen-1 secrets (`APPLE_NOTARY_*`, `APPLE_DEVELOPER_ID_*`)
+   once the new flow is proven.
 
 ## Pinning model
 
@@ -233,9 +196,7 @@ without sharing an account.
   under consumers pinned to `@v1`. Treat `main` as release-stable, or (more
   robust) update the `@main` refs to `@v1` as part of cutting each release
   tag so the whole dependency chain is tag-pinned.
-- Third-party actions are SHA-pinned with a version comment. Current pins
-  (checkout and upload-artifact reuse the SHAs already proven elsewhere in
-  the portfolio):
+- Third-party actions are SHA-pinned with a version comment. Current pins:
   - `actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10` — v6.0.3
   - `maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90` — v1.7.0
   - `softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228` — v3.0.2
@@ -249,15 +210,14 @@ without sharing an account.
 - **Tests before secrets.** The `test` job has no secrets and no
   environment; the `macos-signing` approval gate sits between it and the
   `release` job.
-- **Fail closed, not degraded.** claudelog's graceful-degradation ladder
-  (no cert → unsigned; no ASC key → signed-not-notarized) was deliberately
-  *not* ported: for DMG-shipping consumer apps, a half-signed public
-  release is worse than a failed run. All signing secrets are `required`.
-  Its `.sha256` sidecar *was* ported.
-- **No nested Sparkle re-sign step.** claudelog re-signs Sparkle's XPC
-  services because it hand-assembles its .app from `swift build`. The
-  xcodebuild archive/export path used here signs nested code correctly on
-  its own.
+- **Fail closed, not degraded.** No graceful-degradation ladder (no cert
+  → unsigned; no ASC key → signed-not-notarized): for DMG-shipping
+  consumer apps, a half-signed public release is worse than a failed run.
+  All signing secrets are `required`.
+- **No nested Sparkle re-sign step.** The xcodebuild archive/export path
+  signs nested code (Sparkle's XPC services included) correctly on its
+  own; a separate re-sign step is only needed for hand-assembled .app
+  bundles, which this pipeline does not support.
 - **Build scripts stay in consumer repos** (local dry-runs), the
-  orchestration lives here. The per-repo `generate-appcast.sh` copies are
-  replaced by a built-in appcast step (same key-format validation).
+  orchestration lives here. Appcast generation is built in, including
+  key-format validation.
