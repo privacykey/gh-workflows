@@ -4,11 +4,11 @@ description: >-
   extracting anything, and prepends its bin/ directory (generate_appcast,
   sign_update, generate_keys, ...) to PATH.
 
-  This replaces the unpinned `brew install --cask sparkle` some repos used:
-  the cask floats to whatever version Homebrew currently ships, and nothing
-  checks what was actually downloaded. Here both the version and the archive
-  digest are pinned, so a compromised or replaced release asset fails the
-  job instead of signing your appcast.
+  Unlike an unpinned `brew install --cask sparkle` — where the cask floats
+  to whatever version Homebrew currently ships and nothing checks what was
+  actually downloaded — both the version and the archive digest are pinned
+  here, so a compromised or replaced release asset fails the job instead of
+  signing your appcast.
 
   IMPORTANT: version and sha256 must be bumped together. The default sha256
   only matches the default version's tarball; overriding one without the

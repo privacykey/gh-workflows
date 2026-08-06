@@ -10,7 +10,7 @@ description: >-
       with its default persist-credentials: true (do NOT set it to false
       on the checkout this action publishes from).
 
-  Branch resolution ladder (from the proven FrameSplash release flow):
+  Branch resolution ladder:
     1. the branch already exists locally or on origin  → use it
     2. only origin/<branch> exists                     → branch from it
     3. the branch exists nowhere                       → branch from HEAD
