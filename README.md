@@ -8,7 +8,7 @@ copy-pasted `release.yml`s at three generations of drift.
 
 | Path | What it is |
 |---|---|
-| `.github/workflows/macos-sparkle-release.yml` | Tag-triggered release: test gate → sign → notarize → DMG → appcast → GitHub Release → optional Homebrew cask |
+| `.github/workflows/macos-sparkle-release.yml` | Tag-triggered release: test gate → sign → notarize → DMG → appcast → GitHub Release → optional Homebrew cask PR against the tap |
 | `.github/workflows/macos-app-ci.yml` | Push/PR CI: unsigned build + tests, zero secrets |
 | `actions/setup-apple-keychain` | Ephemeral keychain + Developer ID cert import (`-T codesign`, `set-key-partition-list`, masked password) |
 | `actions/write-asc-api-key` | Stages the App Store Connect `.p8` as a mode-600 file |
@@ -67,7 +67,7 @@ release-script contract):
 | `uses_xcodegen` | `false` | `brew install xcodegen` + `xcodegen generate` first |
 | `sparkle_version` / `sparkle_sha256` | `2.9.5` / pinned digest | Bump together, always |
 | `dmg_name` | `{app}-{version}.dmg` | Verified against the release script's output |
-| `cask_name` / `tap_repo` | empty | Both set (plus `HOMEBREW_TAP_TOKEN`) enables the cask bump; template lives at `packaging/homebrew/<cask_name>.rb` |
+| `cask_name` / `tap_repo` | empty | Both set (plus `HOMEBREW_TAP_TOKEN`) enables the cask PR flow (see below); template lives at `packaging/homebrew/<cask_name>.rb` |
 | `appcast_branch` | `gh-pages` | Where appcast.xml is pushed |
 | `macos_runner` | `macos-15` | |
 | `publish_dsym` | `false` | `true` attaches the dSYM zip to the public Release (it is always kept as a private 365-day workflow artefact) |
@@ -87,6 +87,32 @@ locally). The workflow invokes it with:
 FrameSplash's `scripts/release.sh` is the reference implementation
 (xcodebuild archive → export → notarytool submit --wait → staple →
 hdiutil DMG → codesign + notarize + staple the DMG).
+
+### Homebrew cask updates (PR-based — the org standard)
+
+When `cask_name`, `tap_repo`, and the `HOMEBREW_TAP_TOKEN` secret are all
+set, the release job:
+
+1. renders `packaging/homebrew/<cask_name>.rb` from the consumer repo's
+   template, substituting `@@VERSION@@` / `@@SHA256@@` / `@@URL@@`;
+2. pushes the rendered cask to a **`release/<cask_name>-<version>`
+   branch** in the tap repo;
+3. opens a **pull request** in the tap (via `gh`, authenticated with
+   `HOMEBREW_TAP_TOKEN`) whose body links the triggering GitHub Release
+   and carries the version/SHA-256/DMG details.
+
+Nothing is ever pushed to the tap's default branch. Merging the tap PR is
+the publish action — that's when `brew upgrade --cask <cask_name>` starts
+seeing the new version. Re-running a release force-refreshes the same
+`release/<cask_name>-<version>` branch and reuses the already-open PR
+instead of stacking duplicates. If any of the three settings is missing,
+the step skips cleanly and the rest of the release is unaffected.
+
+Token requirements: `HOMEBREW_TAP_TOKEN` must be a fine-grained PAT
+scoped to **only** the tap repo, with **Contents: read & write** *and*
+**Pull requests: read & write**. The Pull-requests permission is new with
+the PR flow — tokens minted for the old direct-push flow only carried
+Contents and will fail at `gh pr create` until reissued.
 
 ## Using the CI workflow
 
@@ -131,7 +157,7 @@ notarization for an App Store Connect API key.
 | *(none)* | `APPLE_API_KEY_ID` | New: 10-char Key ID |
 | *(none)* | `APPLE_API_ISSUER` | New: Issuer UUID |
 | `SPARKLE_PRIVATE_KEY` | `SPARKLE_PRIVATE_KEY` | Unchanged — but move it into the `macos-signing` environment |
-| *(none)* | `HOMEBREW_TAP_TOKEN` (optional) | Fine-grained PAT scoped to the tap repo only |
+| *(none)* | `HOMEBREW_TAP_TOKEN` (optional) | Fine-grained PAT scoped to the tap repo only — Contents **and** Pull requests, read & write (the cask lands as a tap PR, not a direct push) |
 
 Why the ASC API key beats Apple-ID + app-specific password: revocable
 per-key in one click, immune to Apple ID 2FA prompts, and org-shareable
@@ -171,7 +197,14 @@ without sharing an account.
       appcast path is proven (or kept and wired via `appcast_script`).
 - [ ] Add a CI caller for `macos-app-ci.yml` (FrameSplash has no push/PR
       workflow today — tests only run at release time).
-- [ ] Verify `HOMEBREW_TAP_TOKEN` is set if the tap step should run.
+- [ ] Verify `HOMEBREW_TAP_TOKEN` is set if the tap step should run, and
+      that the PAT carries **Pull requests: read & write** in addition to
+      Contents — the shared workflow uses the PR-based tap flow, not
+      FrameSplash's old direct push to the tap default branch.
+- [ ] Adjust the release routine: after each release, a
+      `release/<cask_name>-<version>` PR appears in the tap — **merging it
+      is the cask publish step** (`brew upgrade --cask` sees the version
+      only after merge).
 
 ### privacycommand (gen-3, minor deltas)
 

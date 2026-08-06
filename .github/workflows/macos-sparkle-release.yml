@@ -18,7 +18,9 @@ name: macOS Sparkle release (reusable)
 #                   notarytool → staple), pinned+checksummed Sparkle CLI,
 #                   generate_appcast, .sha256 sidecar, GitHub Release,
 #                   appcast push to the Pages branch, optional Homebrew
-#                   cask bump, always() cleanup of signing material.
+#                   cask update PR against the tap (nothing is pushed to
+#                   the tap's default branch), always() cleanup of
+#                   signing material.
 #
 # Consumer contract — the calling repo must provide a release script
 # (default ./scripts/release.sh, override via `release_script`) that
@@ -106,14 +108,16 @@ on:
           Homebrew cask token, e.g. "framesplash". Requires a template at
           packaging/homebrew/<cask_name>.rb in the consumer repo with
           @@VERSION@@ / @@SHA256@@ / @@URL@@ placeholders. Empty skips the
-          tap-publish step entirely.
+          cask step entirely.
         type: string
         required: false
         default: ''
       tap_repo:
         description: >-
-          Homebrew tap repository ("owner/homebrew-tap") the rendered cask
-          is pushed to. Empty skips the tap-publish step.
+          Homebrew tap repository ("owner/homebrew-tap") the cask update
+          PR is opened against. The rendered cask lands on a
+          release/<cask_name>-<version> branch there, never on the tap's
+          default branch. Empty skips the cask step.
         type: string
         required: false
         default: ''
@@ -191,7 +195,8 @@ on:
       HOMEBREW_TAP_TOKEN:
         description: >-
           Optional fine-grained PAT scoped to ONLY the tap repo
-          (Contents: read & write). Empty/absent skips the cask step.
+          (Contents: read & write, plus Pull requests: read & write for
+          the `gh pr create` call). Empty/absent skips the cask step.
         required: false
 
 # Least privilege by default; only the release job opts up to write.
@@ -547,7 +552,7 @@ jobs:
           branch: ${{ inputs.appcast_branch }}
           commit-message: 'Release ${{ steps.resolve.outputs.tag }}'
 
-      - name: Check cask-publish preconditions
+      - name: Check cask-PR preconditions
         # The `secrets` context is not available in step-level `if:`
         # (FrameSplash checked `secrets.HOMEBREW_TAP_TOKEN` there — a
         # latent bug this workflow fixes), so evaluate the gate in a step
@@ -563,25 +568,35 @@ jobs:
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "Cask publish skipped (cask_name, tap_repo, and the HOMEBREW_TAP_TOKEN secret must all be set)."
+            echo "Cask PR skipped (cask_name, tap_repo, and the HOMEBREW_TAP_TOKEN secret must all be set)."
           fi
 
-      - name: Publish Homebrew cask to tap
-        # Renders packaging/homebrew/<cask_name>.rb from its template
-        # (substituting version + DMG url + sha256) and pushes it to the
-        # tap repo so `brew upgrade --cask <cask_name>` picks up the new
+      - name: Open Homebrew cask PR in tap
+        # PR-based tap update flow (the org standard). Renders
+        # packaging/homebrew/<cask_name>.rb from its template (substituting
+        # version + DMG url + sha256), pushes it to a
+        # release/<cask_name>-<version> branch in the tap repo, and opens a
+        # PR there whose body links the triggering release. Nothing lands
+        # on the tap's default branch without review — merging the tap PR
+        # is what makes `brew upgrade --cask <cask_name>` pick up the new
         # version. Skips cleanly until cask_name, tap_repo, AND the
         # HOMEBREW_TAP_TOKEN secret all exist, so releases keep working
         # before the tap is set up. The PAT should be fine-grained and
-        # scoped to ONLY the tap repo (Contents: read & write) to keep the
-        # blast radius to the tap alone if it leaks.
+        # scoped to ONLY the tap repo (Contents + Pull requests, read &
+        # write) to keep the blast radius to the tap alone if it leaks.
         if: steps.cask-gate.outputs.enabled == 'true'
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          # gh authenticates with the tap-scoped PAT — the job's
+          # GITHUB_TOKEN has no access to the tap repo.
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           TAP_REPO: ${{ inputs.tap_repo }}
           CASK_NAME: ${{ inputs.cask_name }}
           RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
-          GH_REPO: ${{ github.repository }}
+          # Deliberately NOT named GH_REPO: gh treats a GH_REPO env var as
+          # its default-repo selector, and it must not point gh at the app
+          # repo while every call here targets the tap.
+          APP_REPO: ${{ github.repository }}
           DMG_PATH: ${{ steps.dmg.outputs.dmg-path }}
         run: |
           set -euo pipefail
@@ -596,7 +611,9 @@ jobs:
           VERSION="${RELEASE_TAG#v}"
           SHA256="$(shasum -a 256 "${DMG_PATH}" | awk '{print $1}')"
           DMG_NAME="$(basename "${DMG_PATH}")"
-          URL="https://github.com/${GH_REPO}/releases/download/${RELEASE_TAG}/${DMG_NAME}"
+          URL="https://github.com/${APP_REPO}/releases/download/${RELEASE_TAG}/${DMG_NAME}"
+          RELEASE_URL="https://github.com/${APP_REPO}/releases/tag/${RELEASE_TAG}"
+          BRANCH="release/${CASK_NAME}-${VERSION}"
 
           echo "Rendering cask: version=${VERSION} sha256=${SHA256}"
           echo "                url=${URL}"
@@ -610,23 +627,57 @@ jobs:
             -e "s|@@URL@@|${URL}|g" \
             "${TEMPLATE}" > "rendered/${CASK_NAME}.rb"
 
-          # Clone the tap with the scoped token, drop in the rendered
-          # cask, and push. Casks/ is the conventional cask directory.
+          # Clone the tap with the scoped token and stage the rendered
+          # cask on a per-release branch. Casks/ is the conventional cask
+          # directory.
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${TAP_REPO}.git" tap-checkout
           mkdir -p tap-checkout/Casks
           cp "rendered/${CASK_NAME}.rb" "tap-checkout/Casks/${CASK_NAME}.rb"
-          (
-            cd tap-checkout
-            git config user.name  "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add "Casks/${CASK_NAME}.rb"
-            if git diff --cached --quiet; then
-              echo "Cask already up to date for ${RELEASE_TAG}; nothing to push."
-            else
-              git commit -m "${CASK_NAME} ${VERSION}"
-              git push origin HEAD
-            fi
-          )
+
+          cd tap-checkout
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Capture the default branch (the PR base) before switching away.
+          BASE_BRANCH="$(git symbolic-ref --short HEAD)"
+          git checkout -B "${BRANCH}"
+          git add "Casks/${CASK_NAME}.rb"
+          if git diff --cached --quiet; then
+            echo "Cask already up to date for ${RELEASE_TAG}; nothing to open a PR for."
+            exit 0
+          fi
+          git commit -m "${CASK_NAME} ${VERSION}"
+          # --force-with-lease is pointless on a branch nothing else
+          # writes to; plain --force lets a re-run of the same release
+          # refresh its own branch.
+          git push --force origin "HEAD:refs/heads/${BRANCH}"
+
+          # One PR per release branch: a re-run's push above already
+          # refreshed any open PR, so only create when none exists.
+          OPEN_PRS="$(gh pr list --repo "${TAP_REPO}" --head "${BRANCH}" --state open --json number --jq 'length')"
+          if [[ "${OPEN_PRS}" != "0" ]]; then
+            echo "Open PR for ${BRANCH} already exists; the push above refreshed it."
+            exit 0
+          fi
+
+          BODY_FILE="$(mktemp -t cask-pr-body)"
+          cat > "${BODY_FILE}" <<EOF
+          Automated cask update for the [${APP_REPO} ${RELEASE_TAG}](${RELEASE_URL}) release.
+
+          | | |
+          |---|---|
+          | Cask | \`${CASK_NAME}\` |
+          | Version | \`${VERSION}\` |
+          | SHA-256 | \`${SHA256}\` |
+          | DMG | ${URL} |
+
+          Merging this PR publishes the update: \`brew upgrade --cask ${CASK_NAME}\` picks up ${VERSION} once it lands.
+          EOF
+          gh pr create \
+            --repo "${TAP_REPO}" \
+            --head "${BRANCH}" \
+            --base "${BASE_BRANCH}" \
+            --title "${CASK_NAME} ${VERSION}" \
+            --body-file "${BODY_FILE}"
 
       - name: Clean up signing material
         # Always runs — even if signing failed — so the .p8 and the
