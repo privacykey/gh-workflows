@@ -1,0 +1,55 @@
+name: 'Write App Store Connect API key'
+description: >-
+  Stages the App Store Connect API key (.p8 PEM contents, usually the
+  APPLE_API_KEY secret) as a mode-600 file under $RUNNER_TEMP, because
+  notarytool's --key flag wants a file path, not the key material.
+
+  The runner VM is destroyed at job end, but the calling job should still
+  delete the file explicitly so a future edit that uploads $RUNNER_TEMP
+  cannot leak it.
+
+  PAIRED CLEANUP (required): composite actions cannot run `post:` steps, so
+  the calling job MUST include an `if: always()` step that removes the file
+  at the path this action outputs as p8-path, e.g. `rm -f "$P8_PATH"`.
+
+inputs:
+  api-key:
+    description: >-
+      Full PEM contents of the App Store Connect API .p8 file
+      (the APPLE_API_KEY secret).
+    required: true
+  filename:
+    description: >-
+      Filename for the staged key under $RUNNER_TEMP.
+    required: false
+    default: 'appstoreconnect.p8'
+
+outputs:
+  p8-path:
+    description: >-
+      Absolute path of the staged .p8 file (mode 600). Pass to notarytool
+      via --key (release scripts read it as APPLE_API_KEY_PATH) and to the
+      paired always() cleanup step.
+    value: ${{ steps.write.outputs.p8-path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Write .p8 with mode 600
+      id: write
+      shell: bash
+      env:
+        API_KEY: ${{ inputs.api-key }}
+        FILENAME: ${{ inputs.filename }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${API_KEY}" ]; then
+          echo "::error::api-key input is empty — is the APPLE_API_KEY secret set (and reachable from this job)?"
+          exit 1
+        fi
+
+        p8_path="${RUNNER_TEMP}/${FILENAME}"
+        umask 077
+        printf '%s' "${API_KEY}" > "${p8_path}"
+        echo "p8-path=${p8_path}" >> "$GITHUB_OUTPUT"

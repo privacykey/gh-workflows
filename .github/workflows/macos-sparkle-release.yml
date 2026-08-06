@@ -1,0 +1,648 @@
+name: macOS Sparkle release (reusable)
+
+# Reusable release pipeline for macOS apps that ship a signed, notarized
+# DMG on GitHub Releases and self-update via Sparkle. Consolidates the
+# copy-pasted pipelines from FrameSplash / privacycommand / BananaBlitz;
+# where the sources disagreed, FrameSplash (the newest generation) wins —
+# differences are noted inline.
+#
+# Shape:
+#   job `test`    — NO secrets, no environment. Runs the repo's tests and
+#                   an unsigned Release build. A failing test trips the
+#                   workflow before any signing secret is read and before
+#                   the macos-signing environment's required-reviewer gate
+#                   fires.
+#   job `release` — needs: test, gated by the `macos-signing` environment.
+#                   Ephemeral keychain, mode-600 ASC API key, consumer
+#                   release script (xcodebuild archive/export → DMG →
+#                   notarytool → staple), pinned+checksummed Sparkle CLI,
+#                   generate_appcast, .sha256 sidecar, GitHub Release,
+#                   appcast push to the Pages branch, optional Homebrew
+#                   cask bump, always() cleanup of signing material.
+#
+# Consumer contract — the calling repo must provide a release script
+# (default ./scripts/release.sh, override via `release_script`) that
+#   reads:  APPLE_SIGNING_IDENTITY  APPLE_API_KEY_PATH  APPLE_API_KEY_ID
+#           APPLE_API_ISSUER        KEYCHAIN_PATH       SCHEME
+#   writes: dist/<app>-<version>.dmg              signed+notarized+stapled
+#           symbols/<app>-<version>.app.dSYM.zip  optional, staged into
+#                                                 dist/ after the appcast
+#                                                 is generated
+# and whose MARKETING_VERSION build setting matches the pushed tag
+# (tag v1.2.3 ⇔ MARKETING_VERSION 1.2.3).
+#
+# Secrets are declared in the `secrets:` block below. Recommended setup
+# (the privacycommand/FrameSplash gen-3 split):
+#   • APPLE_* — org/repo secrets, shared by every macOS app.
+#   • SPARKLE_PRIVATE_KEY — environment secret on the consumer repo's
+#     `macos-signing` environment (per-app, never shared), protected by a
+#     required-reviewers rule. Environment secrets only resolve inside a
+#     job that declares the environment — i.e. the `release` job below —
+#     so consumers using this split MUST call with `secrets: inherit`.
+#     Explicitly mapped secrets (`secrets: { X: ... }`) are resolved in
+#     the CALLER's context, which has no environment, and would come back
+#     empty.
+#
+# Pinning: consumers pin this workflow by tag
+# (privacykey/gh-workflows/.github/workflows/macos-sparkle-release.yml@v1).
+# The composite actions referenced below are pinned to @main of this same
+# repo — see README.md ("Pinning model") for the caveat that entails.
+
+on:
+  workflow_call:
+    inputs:
+      xcodeproj:
+        description: >-
+          Path of the .xcodeproj relative to the repo root, e.g.
+          "FrameSplash/FrameSplash.xcodeproj". With uses_xcodegen: true the
+          project is generated (from project.yml in the same directory)
+          before anything reads it.
+        type: string
+        required: true
+      scheme:
+        description: >-
+          xcodebuild scheme. NOTE: the tag-verification step assumes the
+          app target has the same name as the scheme (true for every
+          current consumer).
+        type: string
+        required: true
+      app_name:
+        description: >-
+          Product name used in the DMG filename. Defaults to the scheme.
+        type: string
+        required: false
+        default: ''
+      uses_xcodegen:
+        description: >-
+          Whether the .xcodeproj is generated from project.yml by xcodegen
+          (installed via brew) before building.
+        type: boolean
+        required: false
+        default: false
+      sparkle_version:
+        description: >-
+          Sparkle CLI release to install for generate_appcast. Bump
+          together with sparkle_sha256.
+        type: string
+        required: false
+        default: '2.9.5'
+      sparkle_sha256:
+        description: >-
+          SHA-256 of Sparkle-<sparkle_version>.tar.xz. Must be bumped in
+          lockstep with sparkle_version.
+        type: string
+        required: false
+        default: '015336b601493e05c237964954bff6191370003d94edefe663724c88840d73cc'
+      dmg_name:
+        description: >-
+          Expected DMG filename pattern; "{app}" and "{version}" are
+          substituted. Used to verify the release script produced what the
+          rest of the pipeline expects.
+        type: string
+        required: false
+        default: '{app}-{version}.dmg'
+      cask_name:
+        description: >-
+          Homebrew cask token, e.g. "framesplash". Requires a template at
+          packaging/homebrew/<cask_name>.rb in the consumer repo with
+          @@VERSION@@ / @@SHA256@@ / @@URL@@ placeholders. Empty skips the
+          tap-publish step entirely.
+        type: string
+        required: false
+        default: ''
+      tap_repo:
+        description: >-
+          Homebrew tap repository ("owner/homebrew-tap") the rendered cask
+          is pushed to. Empty skips the tap-publish step.
+        type: string
+        required: false
+        default: ''
+      appcast_branch:
+        description: 'Branch the appcast.xml is published to.'
+        type: string
+        required: false
+        default: 'gh-pages'
+      macos_runner:
+        description: 'Runner label for both jobs.'
+        type: string
+        required: false
+        default: 'macos-15'
+      publish_dsym:
+        description: >-
+          Attach the dSYM zip to the public GitHub Release. Default false
+          (FrameSplash behaviour: dSYM stays a private 365-day workflow
+          artefact — public debug symbols ease reverse-engineering).
+          privacycommand historically attached it; set true to keep that.
+        type: boolean
+        required: false
+        default: false
+      release_tag:
+        description: >-
+          Tag to release as (e.g. "v0.2.0") when the caller was started by
+          workflow_dispatch rather than a tag push. Defaults to the
+          triggering ref name.
+        type: string
+        required: false
+        default: ''
+      release_script:
+        description: >-
+          Path of the consumer build/sign/notarize script (see the
+          contract in the header comment).
+        type: string
+        required: false
+        default: './scripts/release.sh'
+      appcast_script:
+        description: >-
+          Optional consumer script to generate dist/appcast.xml (it is
+          invoked with "./dist" as its only argument, with
+          SPARKLE_PRIVATE_KEY and DOWNLOAD_URL_PREFIX in the environment).
+          Empty uses the built-in generate_appcast invocation, which most
+          repos should — it replaces the per-repo generate-appcast.sh copy.
+        type: string
+        required: false
+        default: ''
+    secrets:
+      APPLE_CERTIFICATE:
+        description: 'base64 .p12 of the Developer ID Application cert + private key.'
+        required: true
+      APPLE_CERTIFICATE_PASSWORD:
+        description: 'Passphrase for the .p12 above.'
+        required: true
+      APPLE_SIGNING_IDENTITY:
+        description: >-
+          Common-name string, e.g.
+          "Developer ID Application: PrivacyKey (TEAMID)".
+        required: true
+      APPLE_API_KEY:
+        description: 'Full PEM contents of the App Store Connect API .p8 file.'
+        required: true
+      APPLE_API_KEY_ID:
+        description: '10-char Key ID from App Store Connect.'
+        required: true
+      APPLE_API_ISSUER:
+        description: 'Issuer UUID from App Store Connect.'
+        required: true
+      SPARKLE_PRIVATE_KEY:
+        description: >-
+          base64 EdDSA private key from Sparkle's generate_keys (its
+          public half is the app's SUPublicEDKey). Keep it scoped to the
+          macos-signing environment and call with `secrets: inherit`.
+        required: true
+      HOMEBREW_TAP_TOKEN:
+        description: >-
+          Optional fine-grained PAT scoped to ONLY the tap repo
+          (Contents: read & write). Empty/absent skips the cask step.
+        required: false
+
+# Least privilege by default; only the release job opts up to write.
+permissions:
+  contents: read
+
+# One release pipeline per ref. cancel-in-progress stays false: killing a
+# half-published release (Release created, appcast not yet pushed) is worse
+# than waiting. NOTE: GitHub evaluates workflow-level concurrency of a
+# *called* workflow inconsistently across product versions — callers should
+# also declare `concurrency` in their own release.yml (see README snippet).
+concurrency:
+  group: ${{ github.workflow }}-sparkle-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test (no secrets)
+    runs-on: ${{ inputs.macos_runner }}
+    timeout-minutes: 40
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # This job never pushes; don't leave credentials in the checkout.
+          persist-credentials: false
+
+      - name: Select Xcode
+        # latest-stable rather than a hard version pin: the project format
+        # is forward-compatible, and this picks up Xcode security fixes
+        # without workflow edits (FrameSplash rationale).
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
+        with:
+          xcode-version: latest-stable
+
+      - name: Install xcodegen
+        if: inputs.uses_xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        if: inputs.uses_xcodegen
+        env:
+          XCODEPROJ: ${{ inputs.xcodeproj }}
+        run: |
+          set -euo pipefail
+          cd "$(dirname "${XCODEPROJ}")"
+          xcodegen generate
+
+      - name: Run tests (unsigned)
+        env:
+          XCODEPROJ: ${{ inputs.xcodeproj }}
+          SCHEME: ${{ inputs.scheme }}
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+            -project "${XCODEPROJ}" \
+            -scheme "${SCHEME}" \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Unsigned Release build
+        # Catches Release-configuration-only build breakage before the
+        # environment approval gate fires and any secret is read.
+        env:
+          XCODEPROJ: ${{ inputs.xcodeproj }}
+          SCHEME: ${{ inputs.scheme }}
+        run: |
+          set -euo pipefail
+          xcodebuild build \
+            -project "${XCODEPROJ}" \
+            -scheme "${SCHEME}" \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO
+
+  release:
+    name: Sign, notarize & release
+    needs: test
+    runs-on: ${{ inputs.macos_runner }}
+    timeout-minutes: 90
+    # Referencing the environment auto-creates it (unprotected) on first
+    # run. Add a required-reviewers rule to it in the consumer repo so the
+    # pipeline pauses for human approval before any secret is read; scope
+    # SPARKLE_PRIVATE_KEY to it and call with `secrets: inherit`.
+    environment: macos-signing
+    permissions:
+      # Publishes the Release, pushes the appcast branch.
+      contents: write
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # Full history: the release scripts derive CFBundleVersion from
+          # `git rev-list --count HEAD`.
+          fetch-depth: 0
+          # Deliberately NOT persist-credentials: false — this checkout's
+          # credentials push the appcast branch (publish-gh-pages-file).
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
+        with:
+          xcode-version: latest-stable
+
+      - name: Install xcodegen
+        if: inputs.uses_xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        # The release script regenerates too, but generating here means
+        # the verify-tag step below has a project to read from before we
+        # spend any time on signing material.
+        if: inputs.uses_xcodegen
+        env:
+          XCODEPROJ: ${{ inputs.xcodeproj }}
+        run: |
+          set -euo pipefail
+          cd "$(dirname "${XCODEPROJ}")"
+          xcodegen generate
+
+      - name: Resolve release tag
+        id: resolve
+        env:
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Releasing as ${TAG}"
+
+      - name: Verify tag matches Marketing Version
+        # Info.plist carries $(MARKETING_VERSION) as a placeholder that
+        # Xcode resolves at build time, so PlistBuddy can't see it — ask
+        # xcodebuild for the resolved value. -showBuildSettings is a
+        # read-only project load, not a build.
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+          XCODEPROJ: ${{ inputs.xcodeproj }}
+          SCHEME: ${{ inputs.scheme }}
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${TAG#v}"
+          # Assumes target name == scheme name (see the `scheme` input doc).
+          PROJECT_VERSION=$(xcodebuild \
+              -project "${XCODEPROJ}" \
+              -target "${SCHEME}" \
+              -configuration Release \
+              -showBuildSettings \
+            | awk '$1 == "MARKETING_VERSION" { print $3; exit }')
+          if [[ -z "${PROJECT_VERSION}" ]]; then
+            echo "error: could not read MARKETING_VERSION from ${SCHEME} target" >&2
+            exit 1
+          fi
+          if [[ "${TAG_VERSION}" != "${PROJECT_VERSION}" ]]; then
+            echo "error: tag ${TAG_VERSION} does not match Marketing Version ${PROJECT_VERSION}" >&2
+            echo "       Either bump MARKETING_VERSION (project.yml or Xcode target settings)" >&2
+            echo "       or push a tag matching the current value." >&2
+            exit 1
+          fi
+          echo "Marketing Version ${PROJECT_VERSION} matches tag ${TAG_VERSION}"
+
+      - name: Set up keychain + Developer ID cert
+        id: keychain
+        uses: privacykey/gh-workflows/actions/setup-apple-keychain@v1
+        with:
+          certificate-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Write App Store Connect API key
+        id: asc-key
+        uses: privacykey/gh-workflows/actions/write-asc-api-key@v1
+        with:
+          api-key: ${{ secrets.APPLE_API_KEY }}
+
+      - name: Build, sign, and notarize DMG
+        # The xcodebuild archive/export + DMG + notarytool sequence lives
+        # in the consumer repo's release script so it can also be run
+        # locally for dry-runs. See the contract in the header comment.
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_PATH: ${{ steps.asc-key.outputs.p8-path }}
+          # Pin codesign's keychain search to the throwaway keychain the
+          # cert was imported into, so it never falls through to an
+          # interactive unlock prompt on the headless runner.
+          KEYCHAIN_PATH: ${{ steps.keychain.outputs.keychain-path }}
+          SCHEME: ${{ inputs.scheme }}
+          RELEASE_SCRIPT: ${{ inputs.release_script }}
+        run: |
+          set -euo pipefail
+          "${RELEASE_SCRIPT}"
+
+      - name: Verify DMG name
+        # Cross-checks the release script's output against the pipeline's
+        # expectation before anything downstream (appcast, cask, Release
+        # assets) consumes it.
+        id: dmg
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+          APP_NAME: ${{ inputs.app_name }}
+          SCHEME: ${{ inputs.scheme }}
+          DMG_PATTERN: ${{ inputs.dmg_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          APP="${APP_NAME:-${SCHEME}}"
+          EXPECTED="${DMG_PATTERN//\{app\}/${APP}}"
+          EXPECTED="${EXPECTED//\{version\}/${VERSION}}"
+          if [[ ! -f "dist/${EXPECTED}" ]]; then
+            echo "::error::release script did not produce dist/${EXPECTED}"
+            echo "dist/ contains:"
+            ls -la dist/ || true
+            exit 1
+          fi
+          echo "dmg-path=dist/${EXPECTED}" >> "$GITHUB_OUTPUT"
+          echo "DMG present: dist/${EXPECTED}"
+
+      - name: Install Sparkle CLI tools (pinned + checksummed)
+        # Replaces the unpinned `brew install --cask sparkle` some repos
+        # used — see the action for the rationale.
+        uses: privacykey/gh-workflows/actions/install-sparkle-cli@v1
+        with:
+          version: ${{ inputs.sparkle_version }}
+          sha256: ${{ inputs.sparkle_sha256 }}
+
+      - name: Generate appcast
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          # Point the appcast's enclosure URLs at the GitHub Releases CDN
+          # for *this specific tag* — that's where the DMG actually lives.
+          # Without this, generate_appcast defaults to the appcast's own
+          # location (the Pages branch), which 404s for the DMG. Per-tag
+          # rather than /latest/download/ so old appcast items keep
+          # resolving once newer releases ship.
+          DOWNLOAD_URL_PREFIX: 'https://github.com/${{ github.repository }}/releases/download/${{ steps.resolve.outputs.tag }}/'
+          APPCAST_SCRIPT: ${{ inputs.appcast_script }}
+        run: |
+          set -euo pipefail
+          # NOTE: never `set -x` in this step — the Sparkle private key is
+          # in the environment.
+
+          if [[ -n "${APPCAST_SCRIPT}" ]]; then
+            "${APPCAST_SCRIPT}" ./dist
+            exit 0
+          fi
+
+          # ── Built-in path (replaces per-repo generate-appcast.sh) ──
+          if [[ -z "${SPARKLE_PRIVATE_KEY}" ]]; then
+            echo "::error::SPARKLE_PRIVATE_KEY is empty. If it is an environment secret, call this workflow with 'secrets: inherit'." >&2
+            exit 1
+          fi
+
+          # Validate the key format up front so we fail with a clear
+          # message instead of Sparkle's opaque "Failed to decode private
+          # and public keys from secret data". Sparkle accepts, after one
+          # base64 decode:
+          #   • 32 bytes — current "regular seed" format from generate_keys
+          #   • 96 bytes — legacy hashed-seed format (64B priv + 32B pub)
+          # The classic failure mode is double base64-encoding at export.
+          DECODED_BYTES="$(printf '%s' "${SPARKLE_PRIVATE_KEY}" | base64 --decode 2>/dev/null | wc -c | tr -d ' ')"
+          if [[ "${DECODED_BYTES}" != "32" && "${DECODED_BYTES}" != "96" ]]; then
+            echo "error: SPARKLE_PRIVATE_KEY base64-decodes to ${DECODED_BYTES} bytes; Sparkle expects 32 (new) or 96 (legacy)." >&2
+            echo "       Most common cause: double base64-encoding — generate_keys -x already writes base64," >&2
+            echo "       store its output as-is (do NOT pipe through base64 again)." >&2
+            exit 1
+          fi
+
+          # Sparkle's tool wants a file path; mktemp files are mode 600.
+          KEY_FILE="$(mktemp -t sparkle-private)"
+          trap 'rm -f "${KEY_FILE}"' EXIT
+          printf '%s' "${SPARKLE_PRIVATE_KEY}" > "${KEY_FILE}"
+
+          generate_appcast \
+            --ed-key-file "${KEY_FILE}" \
+            --download-url-prefix "${DOWNLOAD_URL_PREFIX}" \
+            -o dist/appcast.xml \
+            ./dist
+          echo "Appcast written to dist/appcast.xml"
+
+      - name: Write .sha256 sidecar
+        # One sidecar per DMG so downloaders (and the Homebrew cask step)
+        # can verify integrity without trusting the Releases CDN blindly.
+        # Runs after generate_appcast so nothing extra sits in dist/ while
+        # Sparkle scans it for release archives.
+        run: |
+          set -euo pipefail
+          (
+            cd dist
+            for f in *.dmg; do
+              shasum -a 256 "$f" | tee "$f.sha256"
+            done
+          )
+
+      - name: Stage dSYM for upload
+        # The release script wrote the dSYM zip to ./symbols/ (kept out of
+        # dist/ so generate_appcast above didn't treat it as another
+        # release archive). Now that the appcast exists, move it into
+        # dist/ for artefact/Release upload.
+        run: |
+          set -euo pipefail
+          if compgen -G "symbols/*.dSYM.zip" > /dev/null; then
+            mv symbols/*.dSYM.zip dist/
+          else
+            echo "::warning::no dSYM zip in symbols/; field crashes for this release won't be symbolicatable"
+          fi
+
+      - name: Compute Release asset list
+        id: assets
+        env:
+          PUBLISH_DSYM: ${{ inputs.publish_dsym }}
+        run: |
+          set -euo pipefail
+          {
+            echo 'list<<ASSETS_EOF'
+            echo 'dist/*.dmg'
+            echo 'dist/*.dmg.sha256'
+            if [[ "${PUBLISH_DSYM}" == "true" ]]; then
+              echo 'dist/*.dSYM.zip'
+            fi
+            echo 'ASSETS_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attach assets to GitHub Release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          # DMG + .sha256 sidecar always; dSYM zip only when publish_dsym
+          # (default false — FrameSplash behaviour — because public debug
+          # symbols ease reverse-engineering; it stays available as the
+          # private workflow artefact below either way).
+          files: ${{ steps.assets.outputs.list }}
+          tag_name: ${{ steps.resolve.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+      - name: Archive dSYM as long-retention workflow artefact
+        # Belt-and-braces: keep a copy of the dSYM in the workflow run's
+        # artefacts even if the Release is later deleted or the asset gets
+        # removed. 365-day retention is the GitHub maximum.
+        if: hashFiles('dist/*.dSYM.zip') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dSYM-${{ steps.resolve.outputs.tag }}
+          path: dist/*.dSYM.zip
+          retention-days: 365
+          if-no-files-found: warn
+
+      - name: Publish appcast to Pages branch
+        uses: privacykey/gh-workflows/actions/publish-gh-pages-file@v1
+        with:
+          file: dist/appcast.xml
+          branch: ${{ inputs.appcast_branch }}
+          commit-message: 'Release ${{ steps.resolve.outputs.tag }}'
+
+      - name: Check cask-publish preconditions
+        # The `secrets` context is not available in step-level `if:`
+        # (FrameSplash checked `secrets.HOMEBREW_TAP_TOKEN` there — a
+        # latent bug this workflow fixes), so evaluate the gate in a step
+        # and branch on its output.
+        id: cask-gate
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          CASK_NAME: ${{ inputs.cask_name }}
+          TAP_REPO: ${{ inputs.tap_repo }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${CASK_NAME}" && -n "${TAP_REPO}" && -n "${HOMEBREW_TAP_TOKEN}" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Cask publish skipped (cask_name, tap_repo, and the HOMEBREW_TAP_TOKEN secret must all be set)."
+          fi
+
+      - name: Publish Homebrew cask to tap
+        # Renders packaging/homebrew/<cask_name>.rb from its template
+        # (substituting version + DMG url + sha256) and pushes it to the
+        # tap repo so `brew upgrade --cask <cask_name>` picks up the new
+        # version. Skips cleanly until cask_name, tap_repo, AND the
+        # HOMEBREW_TAP_TOKEN secret all exist, so releases keep working
+        # before the tap is set up. The PAT should be fine-grained and
+        # scoped to ONLY the tap repo (Contents: read & write) to keep the
+        # blast radius to the tap alone if it leaks.
+        if: steps.cask-gate.outputs.enabled == 'true'
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAP_REPO: ${{ inputs.tap_repo }}
+          CASK_NAME: ${{ inputs.cask_name }}
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+          GH_REPO: ${{ github.repository }}
+          DMG_PATH: ${{ steps.dmg.outputs.dmg-path }}
+        run: |
+          set -euo pipefail
+
+          TEMPLATE="packaging/homebrew/${CASK_NAME}.rb"
+          if [[ ! -f "${TEMPLATE}" ]]; then
+            echo "::error::cask template ${TEMPLATE} not found — add it (with @@VERSION@@/@@SHA256@@/@@URL@@ placeholders) or unset cask_name"
+            exit 1
+          fi
+
+          # Version is the tag without the leading `v`.
+          VERSION="${RELEASE_TAG#v}"
+          SHA256="$(shasum -a 256 "${DMG_PATH}" | awk '{print $1}')"
+          DMG_NAME="$(basename "${DMG_PATH}")"
+          URL="https://github.com/${GH_REPO}/releases/download/${RELEASE_TAG}/${DMG_NAME}"
+
+          echo "Rendering cask: version=${VERSION} sha256=${SHA256}"
+          echo "                url=${URL}"
+
+          # Substitute the three release-specific placeholders; the rest
+          # of the template (desc/name/homepage/app stanza) passes through.
+          mkdir -p rendered
+          sed \
+            -e "s|@@VERSION@@|${VERSION}|g" \
+            -e "s|@@SHA256@@|${SHA256}|g" \
+            -e "s|@@URL@@|${URL}|g" \
+            "${TEMPLATE}" > "rendered/${CASK_NAME}.rb"
+
+          # Clone the tap with the scoped token, drop in the rendered
+          # cask, and push. Casks/ is the conventional cask directory.
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${TAP_REPO}.git" tap-checkout
+          mkdir -p tap-checkout/Casks
+          cp "rendered/${CASK_NAME}.rb" "tap-checkout/Casks/${CASK_NAME}.rb"
+          (
+            cd tap-checkout
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add "Casks/${CASK_NAME}.rb"
+            if git diff --cached --quiet; then
+              echo "Cask already up to date for ${RELEASE_TAG}; nothing to push."
+            else
+              git commit -m "${CASK_NAME} ${VERSION}"
+              git push origin HEAD
+            fi
+          )
+
+      - name: Clean up signing material
+        # Always runs — even if signing failed — so the .p8 and the
+        # keychain don't survive one second longer than they have to.
+        # (The decoded .p12 was already deleted by setup-apple-keychain
+        # right after import; the rm here is belt-and-braces.)
+        if: always()
+        env:
+          P8_PATH: ${{ steps.asc-key.outputs.p8-path }}
+          KEYCHAIN_PATH: ${{ steps.keychain.outputs.keychain-path }}
+        run: |
+          rm -f "${P8_PATH}" 2>/dev/null || true
+          rm -f "${RUNNER_TEMP}/cert.p12" 2>/dev/null || true
+          if [ -n "${KEYCHAIN_PATH}" ]; then
+            security delete-keychain "${KEYCHAIN_PATH}" 2>/dev/null || true
+          fi
+          # Fallback for the default keychain name in case the composite
+          # failed before writing its output.
+          security delete-keychain "${RUNNER_TEMP}/build.keychain" 2>/dev/null || true

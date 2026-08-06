@@ -1,0 +1,138 @@
+name: macOS app CI (reusable)
+
+# Reusable push/PR pipeline: unsigned build + tests, no secrets of any
+# kind. Generalised from BananaBlitz's ci.yml (the only Sparkle repo that
+# had a dedicated CI workflow). Release builds — signing, notarization,
+# DMG, appcast — live in macos-sparkle-release.yml and are triggered by
+# `v*` tag pushes.
+#
+# Consumer usage:
+#
+#   on:
+#     push:
+#       branches: [main]
+#     pull_request:
+#       branches: [main]
+#   jobs:
+#     ci:
+#       uses: privacykey/gh-workflows/.github/workflows/macos-app-ci.yml@v1
+#       with:
+#         xcodeproj: MyApp/MyApp.xcodeproj
+#         scheme: MyApp
+
+on:
+  workflow_call:
+    inputs:
+      xcodeproj:
+        description: >-
+          Path of the .xcodeproj relative to the repo root. With
+          uses_xcodegen: true it is generated (from project.yml in the
+          same directory) before building.
+        type: string
+        required: true
+      scheme:
+        description: 'xcodebuild scheme to build and test.'
+        type: string
+        required: true
+      uses_xcodegen:
+        description: >-
+          Whether the .xcodeproj is generated from project.yml by xcodegen
+          (installed via brew) before building.
+        type: boolean
+        required: false
+        default: false
+      macos_runner:
+        description: 'Runner label.'
+        type: string
+        required: false
+        default: 'macos-15'
+      test_script:
+        description: >-
+          Optional shell command that replaces the default xcodebuild
+          test invocation (e.g. "swift test" or "./scripts/ci-test.sh").
+          Runs from the repo root with bash. Note the default xcresult
+          upload only happens when the default invocation runs.
+        type: string
+        required: false
+        default: ''
+
+# No secrets: this workflow declares none and must never gain any.
+permissions:
+  contents: read
+
+# NOTE: GitHub evaluates workflow-level concurrency of a *called* workflow
+# inconsistently across product versions — callers should also declare
+# `concurrency` in their own ci.yml.
+concurrency:
+  group: ${{ github.workflow }}-macos-app-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build & test (unsigned)
+    runs-on: ${{ inputs.macos_runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # CI never pushes; don't leave credentials in the checkout.
+          persist-credentials: false
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
+        with:
+          xcode-version: latest-stable
+
+      - name: Show toolchain versions
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Install xcodegen
+        if: inputs.uses_xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        if: inputs.uses_xcodegen
+        env:
+          XCODEPROJ: ${{ inputs.xcodeproj }}
+        run: |
+          set -euo pipefail
+          cd "$(dirname "${XCODEPROJ}")"
+          xcodegen generate
+
+      - name: Build & test
+        # CODE_SIGNING_ALLOWED=NO — CI has no signing identity and needs
+        # none. (BananaBlitz's `| xcpretty || (showdestinations; exit 1)`
+        # decoration was dropped: it obscured the real failure and
+        # xcpretty adds nothing the xcresult bundle doesn't carry.)
+        env:
+          XCODEPROJ: ${{ inputs.xcodeproj }}
+          SCHEME: ${{ inputs.scheme }}
+          TEST_SCRIPT: ${{ inputs.test_script }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${TEST_SCRIPT}" ]]; then
+            bash -c "${TEST_SCRIPT}"
+          else
+            xcodebuild test \
+              -project "${XCODEPROJ}" \
+              -scheme "${SCHEME}" \
+              -configuration Debug \
+              -destination 'platform=macOS' \
+              -resultBundlePath TestResults.xcresult \
+              CODE_SIGN_IDENTITY="-" \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGNING_ALLOWED=NO
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-results
+          path: TestResults.xcresult
+          retention-days: 7
+          # A custom test_script may not produce an xcresult bundle.
+          if-no-files-found: ignore
