@@ -1,19 +1,15 @@
 name: iOS release (reusable)
 
-# Reusable iOS archive/TestFlight pipeline. Generalises the only working
-# iOS release automation in the portfolio: TrainieTalkie's ios-release.yml
-# signed-archive job plus its Scripts/archive.sh (xcodegen generate →
-# xcodebuild archive → -exportArchive → optional `xcrun altool --upload-app`).
-# Second intended consumer: restauranteer-ios (xcodegen + SPM with a
-# committed workspace Package.resolved that must not drift — see
-# `spm_resolved_path`).
+# Reusable iOS archive/TestFlight pipeline: xcodegen generate →
+# xcodebuild archive → -exportArchive → optional `xcrun altool
+# --upload-app`.
 #
 # Shape:
 #   job `validate` — NO secrets, no environment. Unsigned Release build for
-#                    the simulator (TrainieTalkie's release-validation gate),
-#                    optional tests with an xcresult artefact. Fails the
-#                    workflow before the ios-signing environment gate fires
-#                    and before any signing material is touched.
+#                    the simulator, optional tests with an xcresult
+#                    artefact. Fails the workflow before the ios-signing
+#                    environment gate fires and before any signing material
+#                    is touched.
 #   job `archive`  — needs: validate, gated by the `ios-signing` environment
 #                    and the `signed_archive` input. Archives Release for
 #                    generic/platform=iOS, exports a signed .ipa, uploads
@@ -22,18 +18,18 @@ name: iOS release (reusable)
 #
 # Two signing modes (the `signing` input, required):
 #
-#   runner-keychain — TrainieTalkie's self-hosted model. The runner fleet
-#       already holds the signing identities in its login keychain and Xcode
-#       is signed into the team, so `-allowProvisioningUpdates` mints/renews
-#       profiles on its own. ZERO Apple secrets in GitHub. This mode never
-#       imports certificates and never deletes anything from the runner's
-#       keychain. If `upload_to_testflight` is enabled, the ASC .p8 is
-#       expected on the runner at ~/.appstoreconnect/private_keys/
-#       AuthKey_<key id>.p8 (the archive.sh contract) and only the two ID
-#       secrets (APPLE_API_KEY_ID / APPLE_API_ISSUER) are needed.
+#   runner-keychain — self-hosted runners with the signing identities
+#       preinstalled on the fleet keychain. Xcode is signed into the team,
+#       so `-allowProvisioningUpdates` mints/renews profiles on its own.
+#       ZERO Apple secrets in GitHub. This mode never imports certificates
+#       and never deletes anything from the runner's keychain. If
+#       `upload_to_testflight` is enabled, the ASC .p8 is expected on the
+#       runner at ~/.appstoreconnect/private_keys/AuthKey_<key id>.p8
+#       (fleet contract) and only the two ID secrets (APPLE_API_KEY_ID /
+#       APPLE_API_ISSUER) are needed.
 #
-#   import — hosted-runner model (e.g. macos-15) for consumers like
-#       restauranteer-ios. Reuses the existing composite actions:
+#   import — hosted runners (e.g. macos-15), certificate imported from
+#       secrets. Reuses the existing composite actions:
 #       setup-apple-keychain imports an Apple Distribution .p12 into an
 #       ephemeral keychain (NOTE: for iOS this is an "Apple Distribution"
 #       certificate, not the macOS "Developer ID Application" one), and
@@ -42,35 +38,32 @@ name: iOS release (reusable)
 #       -authenticationKeyIssuerID so `-allowProvisioningUpdates` works
 #       headlessly. All signing material is cleaned up in an always() step.
 #
-# Upload tooling (the altool question, answered from source):
-#   archive.sh uploads with `xcrun altool --upload-app -f <ipa> -t ios
+# Upload tooling:
+#   The upload is `xcrun altool --upload-app -f <ipa> -t ios
 #   --apiKey <id> --apiIssuer <issuer>` — App Store Connect API-key auth,
-#   .p8 discovered from ~/.appstoreconnect/private_keys/. That is the one
-#   proven CLI upload in the portfolio, so it is the ONLY upload path here.
+#   .p8 discovered from a private_keys directory.
 #   `xcrun notarytool` replaced altool for *notarization* (a macOS/DMG
 #   concern) and cannot upload iOS builds — it has no role in this
 #   workflow. altool --upload-app is Apple-deprecated but still ships and
-#   still works (TrainieTalkie ships with it). If a future Xcode drops it,
-#   the migration path — documented in both consumer repos — is
+#   still works. If a future Xcode drops it, the migration path is
 #   ExportOptions `destination: upload` on the -exportArchive step (or
 #   Transporter); that change lands here once, behind the same inputs, so
 #   no `upload_tool` input is speculatively added today.
 #
 # What this workflow deliberately does NOT do:
-#   • bump MARKETING_VERSION — archive.sh's `-v` writes project.yml and
-#     wants a commit; versioning stays a local, human act.
+#   • bump MARKETING_VERSION — versioning stays a local, human act.
 #   • create App Store Connect app records or first-run provisioning — see
-#     the consumer runbooks (restauranteer-ios docs/appstore/testflight.md).
+#     the consumer repo's own runbook.
 #   • push anything to git. contents: read, persist-credentials: false.
 #
-# Build number (CFBundleVersion): `build_number: auto` (default) replicates
-# archive.sh — minutes since a fixed epoch, monotonic, stateless, no
-# project churn. `project` leaves the project's CURRENT_PROJECT_VERSION
-# alone; a bare integer forces one.
+# Build number (CFBundleVersion): `build_number: auto` (default) is
+# minutes since a fixed epoch — monotonic, stateless, no project churn.
+# `project` leaves the project's CURRENT_PROJECT_VERSION alone; a bare
+# integer forces one.
 #
 # Pinning: consumers pin this workflow by tag (…/ios-release.yml@v1).
 # Composite actions are referenced @v1; third-party actions are SHA-pinned
-# with a version comment, reusing the pins already proven in
+# with a version comment, using the same pins as
 # macos-sparkle-release.yml (see README "Pinning model").
 
 on:
@@ -79,7 +72,7 @@ on:
       xcodeproj:
         description: >-
           Path of the .xcodeproj relative to the repo root, e.g.
-          "TrainieTalkie.xcodeproj". Exactly one of xcodeproj / workspace
+          "MyApp.xcodeproj". Exactly one of xcodeproj / workspace
           must be set. With uses_xcodegen: true the project is generated
           (from project.yml in the same directory) before anything reads it.
         type: string
@@ -103,8 +96,8 @@ on:
           Whether the .xcodeproj is generated from project.yml by xcodegen
           before building. In `import` (hosted) mode xcodegen is installed
           via brew; in `runner-keychain` mode it must be preinstalled on
-          the self-hosted runner (TrainieTalkie fleet contract) and the
-          step fails with a clear error if it is not.
+          the self-hosted runner (fleet contract) and the step fails with
+          a clear error if it is not.
         type: boolean
         required: false
         default: false
@@ -128,8 +121,8 @@ on:
       xcode_version:
         description: >-
           Xcode selection for hosted runners (`import` mode only), passed
-          to maxim-lobanov/setup-xcode. "latest-stable" or a version spec —
-          e.g. restauranteer-ios needs an Xcode with the iOS 26 SDK.
+          to maxim-lobanov/setup-xcode. "latest-stable", or a version spec
+          when the project pins a specific SDK.
         type: string
         required: false
         default: 'latest-stable'
@@ -137,7 +130,7 @@ on:
         description: >-
           DEVELOPER_DIR fallback for `runner-keychain` mode, applied only
           when the runner's default xcodebuild is unusable (CommandLineTools
-          selected) — the archive.sh logic.
+          selected).
         type: string
         required: false
         default: '/Applications/Xcode.app/Contents/Developer'
@@ -152,11 +145,10 @@ on:
         default: 'app-store-connect'
       export_options_path:
         description: >-
-          Path of a committed ExportOptions.plist (TrainieTalkie:
-          Scripts/ExportOptions.plist). Takes precedence over export_method
+          Path of a committed ExportOptions.plist, e.g.
+          Scripts/ExportOptions.plist. Takes precedence over export_method
           / team_id. Empty generates a minimal automatic-signing plist
-          (method + teamID + destination export — the shape documented in
-          restauranteer-ios docs/appstore/testflight.md).
+          (method + teamID + destination: export).
         type: string
         required: false
         default: ''
@@ -165,38 +157,37 @@ on:
           Apple Developer Team ID for the generated ExportOptions plist,
           required when export_options_path is empty. Also passed to
           xcodebuild as a DEVELOPMENT_TEAM override when non-empty — this
-          is how repos that keep the team out of committed config
-          (restauranteer-ios's gitignored Signing.local.xcconfig) inject it
-          in CI; pass it from a repo variable, e.g.
-          team_id: ${{ vars.APPLE_TEAM_ID }}.
+          is how repos that keep the team out of committed config (e.g. in
+          a gitignored xcconfig) inject it in CI; pass it from a repo
+          variable, e.g. team_id: ${{ vars.APPLE_TEAM_ID }}.
         type: string
         required: false
         default: ''
       build_number:
         description: >-
           CFBundleVersion strategy. "auto" (default) — minutes since
-          build_number_epoch, monotonic and stateless (the archive.sh
-          scheme). "project" — leave the project's CURRENT_PROJECT_VERSION
-          untouched. An integer — force that build number.
+          build_number_epoch, monotonic and stateless. "project" — leave
+          the project's CURRENT_PROJECT_VERSION untouched. An integer —
+          force that build number.
         type: string
         required: false
         default: 'auto'
       build_number_epoch:
         description: >-
-          Unix-epoch origin for the "auto" build-number scheme. The default
-          is archive.sh's (2026-07-12 UTC). Any fixed past date works;
-          never move it backwards for a shipped app.
+          Unix-epoch origin for the "auto" build-number scheme. The
+          default corresponds to 2026-07-12 UTC. Any fixed past date
+          works; never move it backwards for a shipped app.
         type: string
         required: false
         default: '1783814400'
       signed_archive:
         description: >-
-          When false, only the secret-free validate job runs — this is how
-          TrainieTalkie keeps PR/push release validation and the manually
-          dispatched signed archive in one workflow: the caller passes an
-          expression gating its workflow_dispatch boolean on
-          github.event_name == 'workflow_dispatch' (see the README
-          consumer snippet).
+          When false, only the secret-free validate job runs — this lets a
+          caller keep PR/push release validation and a manually dispatched
+          signed archive in one workflow: the caller passes an expression
+          gating its workflow_dispatch boolean on
+          github.event_name == 'workflow_dispatch' (see the consumer
+          snippet in docs/ios-release.md).
         type: boolean
         required: false
         default: true
@@ -212,10 +203,9 @@ on:
       run_tests:
         description: >-
           Run `xcodebuild test` (Debug, test_destination) in the validate
-          job, with an xcresult artefact. Default false — matching
-          TrainieTalkie, whose release validation is build-only because its
-          unit tests run in a separate CI workflow. Repos without separate
-          CI should turn this on: never sign untested code.
+          job, with an xcresult artefact. Default false — for repos whose
+          unit tests already run in a separate CI workflow. Repos without
+          separate CI should turn this on: never sign untested code.
         type: boolean
         required: false
         default: false
@@ -223,11 +213,10 @@ on:
         description: >-
           Optional shell command replacing the default test invocation
           (runs from the repo root with bash; implies tests run regardless
-          of run_tests). Use it to reproduce project-specific invocations —
-          e.g. TrainieTalkie's `-only-testing:TrainieTalkieTests
-          -parallel-testing-enabled NO` against its TT-TestRunner
-          simulator. The default xcresult upload only happens for the
-          default invocation.
+          of run_tests). Use it to reproduce project-specific invocations,
+          e.g. an `-only-testing:` filter against a dedicated simulator.
+          The default xcresult upload only happens for the default
+          invocation.
         type: string
         required: false
         default: ''
@@ -239,9 +228,9 @@ on:
         default: 'platform=iOS Simulator,name=iPhone 16'
       spm_resolved_path:
         description: >-
-          Path of a committed Package.resolved to drift-gate (restauranteer-
-          ios: Restauranteer.xcodeproj/project.xcworkspace/xcshareddata/
-          swiftpm/Package.resolved). When set, every xcodebuild invocation
+          Path of a committed Package.resolved to drift-gate, e.g.
+          MyApp.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+          Package.resolved. When set, every xcodebuild invocation
           gets -onlyUsePackageVersionsFromResolvedFile (resolution may
           fetch but may not move off the committed pins) and the file is
           checked for drift after xcodegen and after building. Empty
@@ -363,9 +352,9 @@ jobs:
           exit "${fail}"
 
       - name: Point at the runner's Xcode
-        # archive.sh logic: xcodebuild needs a full Xcode, not the
-        # CommandLineTools instance. Only overrides DEVELOPER_DIR when the
-        # default is unusable, honouring whatever the fleet has selected.
+        # xcodebuild needs a full Xcode, not the CommandLineTools
+        # instance. Only overrides DEVELOPER_DIR when the default is
+        # unusable, honouring whatever the fleet has selected.
         if: inputs.signing == 'runner-keychain'
         env:
           DEVELOPER_DIR_INPUT: ${{ inputs.developer_dir }}
@@ -399,8 +388,8 @@ jobs:
           XCWORKSPACE: ${{ inputs.workspace }}
         run: |
           set -euo pipefail
-          # Self-hosted runners keep brew tools out of the default PATH
-          # (TrainieTalkie fleet); harmless on hosted images.
+          # Self-hosted runners may keep brew tools out of the default
+          # PATH; harmless on hosted images.
           export PATH="/opt/homebrew/bin:$PATH"
           command -v xcodegen >/dev/null || {
             echo "::error::xcodegen is required (preinstalled on self-hosted runners; brew-installed in import mode)"
@@ -411,8 +400,7 @@ jobs:
 
       - name: Verify the SPM pins did not move (post-generate)
         # The whole point of committing the workspace Package.resolved is
-        # reproducible resolution — xcodegen must leave it alone
-        # (restauranteer-ios review §D34).
+        # reproducible resolution — xcodegen must leave it alone.
         if: inputs.spm_resolved_path != ''
         env:
           SPM_RESOLVED: ${{ inputs.spm_resolved_path }}
@@ -421,9 +409,8 @@ jobs:
           git diff --exit-code -- "${SPM_RESOLVED}"
 
       - name: Unsigned Release build
-        # TrainieTalkie's release-validation gate: catches Release-only
-        # build breakage with zero signing involved, before the environment
-        # approval gate fires.
+        # Catches Release-only build breakage with zero signing involved,
+        # before the environment approval gate fires.
         env:
           XCODEPROJ: ${{ inputs.xcodeproj }}
           XCWORKSPACE: ${{ inputs.workspace }}
@@ -589,9 +576,8 @@ jobs:
           set -euo pipefail
           case "${BUILD_NUMBER}" in
             auto)
-              # archive.sh scheme: minutes since the epoch — monotonic,
-              # small, rising, and stateless (no project.yml churn or
-              # cross-machine drift).
+              # Minutes since the epoch — monotonic, small, rising, and
+              # stateless (no project.yml churn or cross-machine drift).
               BN=$(( ($(date +%s) - BUILD_NUMBER_EPOCH) / 60 ))
               echo "Build number (auto): ${BN}"
               ;;
@@ -622,10 +608,8 @@ jobs:
             echo "plist-path=${EXPORT_OPTIONS_PATH}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Minimal automatic-signing plist — the shape both consumer repos
-          # document (TrainieTalkie Scripts/ExportOptions.plist,
-          # restauranteer-ios docs/appstore/testflight.md §5 path B, minus
-          # its destination:upload — artefacts first, upload separately).
+          # Minimal automatic-signing plist. destination stays "export" —
+          # artefacts first, upload separately.
           mkdir -p build
           {
             printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
@@ -671,7 +655,7 @@ jobs:
             -archivePath "build/${SCHEME}.xcarchive"
             # Automatic signing mints/renews the distribution cert and App
             # Store profiles. runner-keychain mode: authenticated by the
-            # runner's signed-in Xcode account (TrainieTalkie model).
+            # runner's signed-in Xcode account.
             -allowProvisioningUpdates
           )
           if [[ -n "${SPM_RESOLVED}" ]]; then
@@ -697,7 +681,7 @@ jobs:
           fi
           if [[ -n "${TEAM_ID}" ]]; then
             # Injects the team for repos that keep it out of committed
-            # config (restauranteer-ios's gitignored Signing.local.xcconfig).
+            # config (e.g. in a gitignored xcconfig).
             SETTINGS+=(DEVELOPMENT_TEAM="${TEAM_ID}")
           fi
           # ${SETTINGS[@]+…} guard: macOS /bin/bash is 3.2, where expanding
@@ -740,8 +724,8 @@ jobs:
           xcodebuild "${ARGS[@]}"
 
       - name: Verify .ipa produced
-        # archive.sh's check, verbatim in spirit: -exportArchive can
-        # "succeed" without writing an .ipa when export options are wrong.
+        # -exportArchive can "succeed" without writing an .ipa when export
+        # options are wrong.
         id: ipa
         run: |
           set -euo pipefail
@@ -790,9 +774,9 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload to TestFlight
-        # archive.sh's proven upload, generalised: ASC API-key auth, never
-        # Apple-ID/app-specific-password. See the header comment for why
-        # this is altool (and why notarytool is not an option here).
+        # ASC API-key auth, never Apple-ID/app-specific-password. See the
+        # header comment for why this is altool (and why notarytool is not
+        # an option here).
         if: inputs.upload_to_testflight
         env:
           SIGNING: ${{ inputs.signing }}
@@ -820,7 +804,7 @@ jobs:
           fi
           # runner-keychain mode: the .p8 already sits at
           # ~/.appstoreconnect/private_keys/AuthKey_<KEY_ID>.p8 on the
-          # runner (the archive.sh contract) — altool searches there.
+          # runner (fleet contract) — altool searches there.
           echo "Uploading ${IPA} to App Store Connect…"
           xcrun altool --upload-app -f "${IPA}" -t ios \
             --apiKey "${KEY_ID}" --apiIssuer "${ISSUER}"
