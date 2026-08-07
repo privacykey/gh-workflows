@@ -819,6 +819,7 @@ jobs:
         env:
           KEYCHAIN_PATH: ${{ steps.keychain.outputs.keychain-path }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ inputs.team_id }}
           APPLE_API_KEY_PATH: ${{ steps.asc-key.outputs.p8-path }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
