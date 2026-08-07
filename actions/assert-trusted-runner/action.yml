@@ -1,0 +1,107 @@
+name: 'Assert trusted self-hosted runner context'
+description: >-
+  Fail-closed guard for jobs that can land on a self-hosted runner. A
+  self-hosted runner is a persistent machine that is not reset between jobs,
+  so anything a job can read or write, the next job — and the person who
+  proposed it — can reach.
+
+  Two rules are enforced, and only when the job is actually running on a
+  self-hosted runner (on a GitHub-hosted runner the step is a no-op, which
+  is what makes it safe to leave in a shared workflow whose default is
+  hosted):
+
+    1. The repository must be private. Public repositories accept pull
+       requests from strangers, and those are free to run on GitHub-hosted
+       runners anyway — so there is never a reason to point one at owned
+       hardware. If a repository is ever flipped to public, its jobs start
+       failing here instead of silently accepting fork code.
+
+    2. On a pull request, the head repository must be this repository. A
+       fork PR must never execute on the fleet.
+
+  This is the second of two layers. The first is the job-level `if:` in the
+  calling workflow, which GitHub evaluates *before allocating a runner* — a
+  job rejected there never reaches the host at all. This step exists because
+  that `if:` is one hand-edit or one new trigger away from being wrong, and
+  a guard that only lives in YAML someone can delete is not a guard.
+
+  Visibility is read from the event payload. If it cannot be determined the
+  step fails: an unknown answer is treated as "not private".
+
+inputs:
+  allow-public:
+    description: >-
+      Escape hatch for the rare case of a deliberately public repository on
+      dedicated hardware. Set to "true" only with a documented reason — it
+      turns off rule 1 and leaves the host reachable by fork pull requests
+      via any trigger the fork gate does not cover.
+    required: false
+    default: 'false'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Assert trusted context
+      shell: bash
+      # Every value is passed through the environment rather than
+      # interpolated into the script. `head.repo.full_name` is attacker-
+      # controlled (a fork can be named anything, including shell
+      # metacharacters), and `${{ }}` interpolation pastes it into the
+      # script body before bash ever sees it.
+      env:
+        RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        IS_PRIVATE: ${{ github.event.repository.private }}
+        EVENT_NAME: ${{ github.event_name }}
+        HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        BASE_REPO: ${{ github.repository }}
+        ALLOW_PUBLIC: ${{ inputs.allow-public }}
+      run: |
+        set -euo pipefail
+
+        if [ "${RUNNER_ENVIRONMENT}" != "self-hosted" ]; then
+          echo "GitHub-hosted runner (${RUNNER_ENVIRONMENT:-unknown}) — self-hosted guard does not apply."
+          exit 0
+        fi
+
+        fail=0
+
+        case "${IS_PRIVATE}" in
+          true)
+            echo "Repository visibility: private."
+            ;;
+          false)
+            if [ "${ALLOW_PUBLIC}" = "true" ]; then
+              echo "::warning::${BASE_REPO} is public and allow-public is set. Fork pull requests can reach this host through any trigger the fork gate does not cover."
+            else
+              echo "::error::${BASE_REPO} is public — refusing to run on a self-hosted runner."
+              echo "::error::Public repositories accept pull requests from anyone, and their Actions minutes are free. Use a GitHub-hosted runner."
+              fail=1
+            fi
+            ;;
+          *)
+            echo "::error::Could not determine repository visibility from the '${EVENT_NAME}' event payload (github.event.repository.private was '${IS_PRIVATE}')."
+            echo "::error::Failing closed: an unknown visibility is treated as public."
+            fail=1
+            ;;
+        esac
+
+        case "${EVENT_NAME}" in
+          pull_request|pull_request_target)
+            if [ "${HEAD_REPO}" != "${BASE_REPO}" ]; then
+              echo "::error::Pull request head is '${HEAD_REPO}', not '${BASE_REPO}' — fork code must never execute on a self-hosted runner."
+              fail=1
+            else
+              echo "Pull request head repository matches the base repository."
+            fi
+            ;;
+          *)
+            echo "Event '${EVENT_NAME}' carries no pull request head to check."
+            ;;
+        esac
+
+        if [ "${fail}" -ne 0 ]; then
+          echo "::error::Trusted-context assertion failed. This job should have been rejected by its job-level 'if:' before a runner was allocated — check that gate too."
+          exit 1
+        fi
+
+        echo "Trusted context confirmed for a self-hosted runner."

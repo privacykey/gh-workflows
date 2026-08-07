@@ -17,6 +17,14 @@ name: macOS app CI (reusable)
 #       with:
 #         xcodeproj: MyApp/MyApp.xcodeproj
 #         scheme: MyApp
+#
+# To run on the self-hosted macOS fleet instead of a hosted image, pass a
+# JSON array of runner labels:
+#
+#         runner: '["self-hosted", "macOS", "ARM64", "repo-ci"]'
+#
+# That is available to PRIVATE repositories only, and the workflow enforces
+# it — see the `runner` input and the job-level gate below.
 
 on:
   workflow_call:
@@ -40,7 +48,24 @@ on:
         required: false
         default: false
       macos_runner:
-        description: 'Runner label.'
+        description: >-
+          Deprecated: use `runner`. A non-empty value still takes
+          precedence over a plain-label `runner`, so an existing caller's
+          pin keeps working untouched. Migrate by moving the value across.
+        type: string
+        required: false
+        default: ''
+      runner:
+        description: >-
+          Either a plain label ("macos-15") or a JSON array string
+          ('["self-hosted", "macOS", "ARM64", "repo-ci"]' — double quotes
+          inside, parsed with fromJSON when it starts with "["). Same
+          convention as ios-release.yml.
+
+          Defaults to a hosted image on purpose: pointing at the fleet is
+          an explicit, per-consumer opt-in, so a repository that has not
+          asked for it — a public one especially — can never end up on
+          owned hardware by inheriting a default.
         type: string
         required: false
         default: 'macos-15'
@@ -68,16 +93,42 @@ concurrency:
 jobs:
   build-and-test:
     name: Build & test (unsigned)
-    runs-on: ${{ inputs.macos_runner }}
+    # Fork pull requests are rejected here, before a runner is allocated,
+    # whenever the caller has opted into the self-hosted fleet (a JSON
+    # array of labels). Nothing from a fork ever reaches the host.
+    #
+    # Repository *visibility* is deliberately NOT checked here. A skipped
+    # job reports success, and a public repository wired to the fleet is a
+    # configuration mistake that must be loud — so it is caught by the
+    # first step below instead, which fails the job before checkout.
+    if: >-
+      !startsWith(inputs.runner, '[') ||
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || (inputs.macos_runner != '' && inputs.macos_runner || inputs.runner) }}
     timeout-minutes: 30
     steps:
+      # First, before checkout: no repository content is fetched onto a
+      # self-hosted host until the context has been proven trusted.
+      - name: Assert trusted runner context
+        uses: privacykey/gh-workflows/actions/assert-trusted-runner@v1
+
       - name: Check out source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           # CI never pushes; don't leave credentials in the checkout.
           persist-credentials: false
+          # Explicit rather than implicit: on a persistent runner the
+          # workspace is whatever the last job left behind, and this is
+          # what wipes it.
+          clean: true
 
       - name: Select Xcode
+        # Hosted images only. setup-xcode changes the machine's selected
+        # Xcode globally, which on a shared self-hosted host would reach
+        # into every other repository's builds — the fleet pins its own
+        # toolchain instead.
+        if: runner.environment == 'github-hosted'
         uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
         with:
           xcode-version: latest-stable
@@ -88,7 +139,9 @@ jobs:
           swift --version
 
       - name: Install xcodegen
-        if: inputs.uses_xcodegen
+        # Hosted images don't ship it. Self-hosted runners must have it
+        # preinstalled (fleet contract) — the generate step checks.
+        if: inputs.uses_xcodegen && runner.environment == 'github-hosted'
         run: brew install xcodegen
 
       - name: Generate Xcode project
@@ -97,6 +150,13 @@ jobs:
           XCODEPROJ: ${{ inputs.xcodeproj }}
         run: |
           set -euo pipefail
+          # Self-hosted runners may keep brew tools out of the default
+          # PATH; harmless on hosted images.
+          export PATH="/opt/homebrew/bin:$PATH"
+          command -v xcodegen >/dev/null || {
+            echo "::error::xcodegen is required (preinstalled on self-hosted runners; brew-installed on hosted images)"
+            exit 1
+          }
           cd "$(dirname "${XCODEPROJ}")"
           xcodegen generate
 

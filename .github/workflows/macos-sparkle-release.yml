@@ -123,10 +123,37 @@ on:
         required: false
         default: 'gh-pages'
       macos_runner:
-        description: 'Runner label for both jobs.'
+        description: >-
+          Deprecated: use `runner` / `release_runner`. A non-empty value
+          still takes precedence over a plain-label `runner`, so an
+          existing caller's pin keeps working untouched.
+        type: string
+        required: false
+        default: ''
+      runner:
+        description: >-
+          Runner for the secret-free `test` job: a plain label
+          ("macos-15") or a JSON array string
+          ('["self-hosted", "macOS", "ARM64", "repo-ci"]', parsed with
+          fromJSON when it starts with "["). Private repositories only —
+          enforced at runtime, see the assert step in each job.
         type: string
         required: false
         default: 'macos-15'
+      release_runner:
+        description: >-
+          Runner for the `release` job, which is the one that touches the
+          signing identity. Defaults to whatever `runner` resolves to.
+
+          Set this separately to keep signing off the ordinary CI machine:
+          the fleet's contract is that build/test runners carry the
+          `repo-ci` label and never hold a distribution certificate, while
+          a signing runner carries `release-signing`, lives in its own
+          macOS account, and runs no pull request code. Labels route jobs;
+          the account boundary is what actually separates them.
+        type: string
+        required: false
+        default: ''
       publish_dsym:
         description: >-
           Attach the dSYM zip to the public GitHub Release. Default false:
@@ -211,25 +238,38 @@ concurrency:
 jobs:
   test:
     name: Test (no secrets)
-    runs-on: ${{ inputs.macos_runner }}
+    runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || (inputs.macos_runner != '' && inputs.macos_runner || inputs.runner) }}
     timeout-minutes: 40
     steps:
+      # Before checkout: nothing is fetched onto a self-hosted host until
+      # the context is proven trusted. A no-op on hosted images.
+      - name: Assert trusted runner context
+        uses: privacykey/gh-workflows/actions/assert-trusted-runner@v1
+
       - name: Check out source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           # This job never pushes; don't leave credentials in the checkout.
           persist-credentials: false
+          # On a persistent runner the workspace is whatever the last job
+          # left behind; this is what wipes it.
+          clean: true
 
       - name: Select Xcode
         # latest-stable rather than a hard version pin: the project format
         # is forward-compatible, and this picks up Xcode security fixes
-        # without workflow edits.
+        # without workflow edits. Hosted images only — on a shared
+        # self-hosted host this would change the selected Xcode for every
+        # other repository's builds too.
+        if: runner.environment == 'github-hosted'
         uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
         with:
           xcode-version: latest-stable
 
       - name: Install xcodegen
-        if: inputs.uses_xcodegen
+        # Hosted images don't ship it; self-hosted runners must have it
+        # preinstalled (fleet contract).
+        if: inputs.uses_xcodegen && runner.environment == 'github-hosted'
         run: brew install xcodegen
 
       - name: Generate Xcode project
@@ -238,6 +278,13 @@ jobs:
           XCODEPROJ: ${{ inputs.xcodeproj }}
         run: |
           set -euo pipefail
+          # Self-hosted runners may keep brew tools out of the default
+          # PATH; harmless on hosted images.
+          export PATH="/opt/homebrew/bin:$PATH"
+          command -v xcodegen >/dev/null || {
+            echo "::error::xcodegen is required (preinstalled on self-hosted runners; brew-installed on hosted images)"
+            exit 1
+          }
           cd "$(dirname "${XCODEPROJ}")"
           xcodegen generate
 
@@ -272,7 +319,8 @@ jobs:
   release:
     name: Sign, notarize & release
     needs: test
-    runs-on: ${{ inputs.macos_runner }}
+    # release_runner when set, otherwise the same resolution as `test`.
+    runs-on: ${{ inputs.release_runner != '' && (startsWith(inputs.release_runner, '[') && fromJSON(inputs.release_runner) || inputs.release_runner) || (startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || (inputs.macos_runner != '' && inputs.macos_runner || inputs.runner)) }}
     timeout-minutes: 90
     # Referencing the environment auto-creates it (unprotected) on first
     # run. Add a required-reviewers rule to it in the consumer repo so the
@@ -284,6 +332,11 @@ jobs:
       contents: write
 
     steps:
+      # This job holds the signing identity and a push-capable token, so
+      # the guard runs before anything is fetched here too.
+      - name: Assert trusted runner context
+        uses: privacykey/gh-workflows/actions/assert-trusted-runner@v1
+
       - name: Check out source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -292,14 +345,23 @@ jobs:
           fetch-depth: 0
           # Deliberately NOT persist-credentials: false — this checkout's
           # credentials push the appcast branch (publish-gh-pages-file).
+          #
+          # That makes workspace hygiene matter on a self-hosted runner:
+          # these credentials land in .git/config, so the job below wipes
+          # them in an always() step rather than leaving them for whatever
+          # runs next on the same machine.
+          clean: true
 
       - name: Select Xcode
+        if: runner.environment == 'github-hosted'
         uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
         with:
           xcode-version: latest-stable
 
       - name: Install xcodegen
-        if: inputs.uses_xcodegen
+        # Hosted images don't ship it; self-hosted runners must have it
+        # preinstalled (fleet contract).
+        if: inputs.uses_xcodegen && runner.environment == 'github-hosted'
         run: brew install xcodegen
 
       - name: Generate Xcode project
@@ -311,6 +373,13 @@ jobs:
           XCODEPROJ: ${{ inputs.xcodeproj }}
         run: |
           set -euo pipefail
+          # Self-hosted runners may keep brew tools out of the default
+          # PATH; harmless on hosted images.
+          export PATH="/opt/homebrew/bin:$PATH"
+          command -v xcodegen >/dev/null || {
+            echo "::error::xcodegen is required (preinstalled on self-hosted runners; brew-installed on hosted images)"
+            exit 1
+          }
           cd "$(dirname "${XCODEPROJ}")"
           xcodegen generate
 
@@ -682,6 +751,7 @@ jobs:
         env:
           P8_PATH: ${{ steps.asc-key.outputs.p8-path }}
           KEYCHAIN_PATH: ${{ steps.keychain.outputs.keychain-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           rm -f "${P8_PATH}" 2>/dev/null || true
           rm -f "${RUNNER_TEMP}/cert.p12" 2>/dev/null || true
@@ -691,3 +761,12 @@ jobs:
           # Fallback for the default keychain name in case the composite
           # failed before writing its output.
           security delete-keychain "${RUNNER_TEMP}/build.keychain" 2>/dev/null || true
+
+          # Self-hosted only: this job checks out *with* credentials (it
+          # pushes the appcast), so they are sitting in .git/config on a
+          # machine that keeps its disk between jobs. A hosted runner is
+          # destroyed and needs none of this.
+          if [ "${RUNNER_ENVIRONMENT}" = "self-hosted" ]; then
+            git -C "${GITHUB_WORKSPACE}" config --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+            git -C "${GITHUB_WORKSPACE}" credential-cache exit 2>/dev/null || true
+          fi

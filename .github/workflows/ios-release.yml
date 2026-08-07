@@ -368,11 +368,21 @@ jobs:
     runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
     timeout-minutes: 40
     steps:
+      # Before checkout: nothing is fetched onto a self-hosted host until
+      # the context is proven trusted (private repository, and — if this
+      # is ever wired to a pull request — not a fork). A no-op on hosted
+      # images, which is why it can live in the shared workflow.
+      - name: Assert trusted runner context
+        uses: privacykey/gh-workflows/actions/assert-trusted-runner@v1
+
       - name: Check out source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           # This workflow never pushes; don't leave credentials in the checkout.
           persist-credentials: false
+          # On a persistent runner the workspace is whatever the last job
+          # left behind; this is what wipes it.
+          clean: true
 
       - name: Preflight input validation
         # Pure input logic, up front and in the secret-free job, so a
@@ -600,6 +610,11 @@ jobs:
     # that declares the environment).
     environment: ios-signing
     steps:
+      # This job reaches the signing identity, so it re-asserts rather
+      # than trusting that `validate` already did.
+      - name: Assert trusted runner context
+        uses: privacykey/gh-workflows/actions/assert-trusted-runner@v1
+
       - name: Check out source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -607,6 +622,9 @@ jobs:
           # (minutes since epoch), unlike the macOS pipeline's
           # rev-list-count scheme. Never pushes either.
           persist-credentials: false
+          # On a persistent runner the workspace is whatever the last job
+          # left behind; this is what wipes it.
+          clean: true
 
       - name: Point at the runner's Xcode
         if: inputs.signing == 'runner-keychain'
