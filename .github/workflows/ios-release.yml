@@ -38,6 +38,41 @@ name: iOS release (reusable)
 #       -authenticationKeyIssuerID so `-allowProvisioningUpdates` works
 #       headlessly. All signing material is cleaned up in an always() step.
 #
+# Fastlane mode (`use_fastlane: true`, orthogonal to the signing mode):
+#   The repo's fastlane lanes replace the inline xcodebuild invocations;
+#   everything around them — preflight, xcodegen, SPM drift gates, the
+#   ios-signing environment gate, keychain/ASC-key setup, artefact
+#   uploads, the TestFlight upload, and signing-material cleanup — is
+#   identical in both modes.
+#   Repo prerequisites: a committed Gemfile + Gemfile.lock containing the
+#   fastlane gem (bundler-cache installs from the lockfile) and a Ruby
+#   version declared where ruby/setup-ruby can find it (.ruby-version,
+#   .tool-versions, or the Gemfile's `ruby` line), plus a
+#   fastlane/Fastfile defining the two lanes.
+#   validate — `bundle exec fastlane <fastlane_test_lane>` replaces the
+#       unsigned Release build and the run_tests/test_script invocation
+#       (those inputs apply to the non-fastlane path only). A lane that
+#       writes build/TestResults/Tests.xcresult gets it uploaded as the
+#       test artefact.
+#   archive — `bundle exec fastlane <fastlane_archive_lane>` replaces the
+#       xcodebuild archive/-exportArchive steps. Lane contract:
+#         reads:  KEYCHAIN_PATH  APPLE_SIGNING_IDENTITY  APPLE_API_KEY_PATH
+#                 APPLE_API_KEY_ID  APPLE_API_ISSUER  EXPORT_METHOD
+#                 BUILD_NUMBER
+#                 (KEYCHAIN_PATH / APPLE_API_KEY_PATH are empty in
+#                 runner-keychain mode — the material already lives on the
+#                 runner; BUILD_NUMBER is empty with build_number:
+#                 project, meaning: leave CURRENT_PROJECT_VERSION alone)
+#         writes: build/export/<name>.ipa   — verified and uploaded as the
+#                 IPA artefact; also what the TestFlight upload sends
+#                 build/<scheme>.xcarchive  — dSYMs are zipped from it
+#                 (missing archive degrades to the no-dSYMs warning)
+#       The export-options resolution still runs but its plist is not
+#       passed to the lane — the lane owns its export options and receives
+#       the export_method input as EXPORT_METHOD.
+#   With spm_resolved_path set, the drift gates apply to the lanes too: a
+#   lane that moves the committed pins fails the post-archive check.
+#
 # Upload tooling:
 #   The upload is `xcrun altool --upload-app -f <ipa> -t ios
 #   --apiKey <id> --apiIssuer <issuer>` — App Store Connect API-key auth,
@@ -226,6 +261,38 @@ on:
         type: string
         required: false
         default: 'platform=iOS Simulator,name=iPhone 16'
+      use_fastlane:
+        description: >-
+          Delegate the build/test and archive/export work to the repo's
+          fastlane lanes (`bundle exec fastlane <lane>`) instead of the
+          inline xcodebuild invocations. Everything around the lanes —
+          preflight, xcodegen, SPM drift gates, environment gate,
+          keychain/ASC-key setup, artefact uploads, TestFlight upload,
+          cleanup — is unchanged. See the header comment for the repo
+          prerequisites and the archive lane's env/output contract.
+        type: boolean
+        required: false
+        default: false
+      fastlane_test_lane:
+        description: >-
+          Lane the validate job runs when use_fastlane is true. Replaces
+          the unsigned Release build and the run_tests / test_script
+          invocation (those inputs apply to the non-fastlane path only).
+          If the lane writes build/TestResults/Tests.xcresult, that bundle
+          is uploaded as the test artefact.
+        type: string
+        required: false
+        default: 'test'
+      fastlane_archive_lane:
+        description: >-
+          Lane the archive job runs when use_fastlane is true. Replaces
+          the xcodebuild archive/-exportArchive steps; must write the
+          .ipa under build/export/ and, for dSYM capture, the archive at
+          build/<scheme>.xcarchive. Reads the env contract in the header
+          comment.
+        type: string
+        required: false
+        default: 'archive'
       spm_resolved_path:
         description: >-
           Path of a committed Package.resolved to drift-gate, e.g.
@@ -274,6 +341,14 @@ on:
       APPLE_API_ISSUER:
         description: 'ASC Issuer UUID. Same requirement rules as APPLE_API_KEY_ID.'
         required: false
+      APPLE_SIGNING_IDENTITY:
+        description: >-
+          Common-name string of the signing identity, e.g. "Apple
+          Distribution: Example Corp (TEAMID)". Only exported to the
+          fastlane archive lane (use_fastlane mode), for lanes that sign
+          manually; lanes using automatic signing can ignore it. The
+          inline xcodebuild path never reads it.
+        required: false
 
 # This workflow never pushes; nothing here needs more than read.
 permissions:
@@ -312,6 +387,9 @@ jobs:
           TEAM_ID: ${{ inputs.team_id }}
           BUILD_NUMBER: ${{ inputs.build_number }}
           BUILD_NUMBER_EPOCH: ${{ inputs.build_number_epoch }}
+          USE_FASTLANE: ${{ inputs.use_fastlane }}
+          FASTLANE_TEST_LANE: ${{ inputs.fastlane_test_lane }}
+          FASTLANE_ARCHIVE_LANE: ${{ inputs.fastlane_archive_lane }}
         run: |
           set -euo pipefail
           fail=0
@@ -348,6 +426,12 @@ jobs:
           if ! [[ "${BUILD_NUMBER_EPOCH}" =~ ^[0-9]+$ ]]; then
             echo "::error::build_number_epoch must be an integer unix timestamp — got '${BUILD_NUMBER_EPOCH}'"
             fail=1
+          fi
+          if [[ "${USE_FASTLANE}" == "true" ]]; then
+            if [[ -z "${FASTLANE_TEST_LANE}" || -z "${FASTLANE_ARCHIVE_LANE}" ]]; then
+              echo "::error::use_fastlane needs non-empty fastlane_test_lane and fastlane_archive_lane"
+              fail=1
+            fi
           fi
           exit "${fail}"
 
@@ -408,9 +492,32 @@ jobs:
           set -euo pipefail
           git diff --exit-code -- "${SPM_RESOLVED}"
 
+      - name: Set up Ruby (fastlane)
+        if: inputs.use_fastlane
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          # Installs the bundle from the committed Gemfile.lock and caches
+          # it. The Ruby version comes from the repo (.ruby-version,
+          # .tool-versions, or the Gemfile's `ruby` line).
+          bundler-cache: true
+
+      - name: Run fastlane test lane
+        # In fastlane mode the lane is the pre-signing validation,
+        # replacing the unsigned Release build and the run_tests /
+        # test_script invocation. A lane that writes
+        # build/TestResults/Tests.xcresult gets it uploaded as the test
+        # artefact.
+        if: inputs.use_fastlane
+        env:
+          LANE: ${{ inputs.fastlane_test_lane }}
+        run: |
+          set -euo pipefail
+          bundle exec fastlane "${LANE}"
+
       - name: Unsigned Release build
         # Catches Release-only build breakage with zero signing involved,
         # before the environment approval gate fires.
+        if: ${{ !inputs.use_fastlane }}
         env:
           XCODEPROJ: ${{ inputs.xcodeproj }}
           XCWORKSPACE: ${{ inputs.workspace }}
@@ -436,7 +543,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
 
       - name: Run tests (unsigned)
-        if: inputs.run_tests || inputs.test_script != ''
+        if: ${{ !inputs.use_fastlane && (inputs.run_tests || inputs.test_script != '') }}
         env:
           XCODEPROJ: ${{ inputs.xcodeproj }}
           XCWORKSPACE: ${{ inputs.workspace }}
@@ -469,13 +576,14 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
 
       - name: Upload test results
-        if: always() && (inputs.run_tests || inputs.test_script != '')
+        if: always() && (inputs.use_fastlane || inputs.run_tests || inputs.test_script != '')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ios-test-results-${{ github.run_id }}
           path: build/TestResults/Tests.xcresult
           retention-days: 7
-          # A custom test_script may not produce an xcresult bundle.
+          # A custom test_script or a fastlane lane may not produce an
+          # xcresult bundle at this path.
           if-no-files-found: ignore
 
   archive:
@@ -628,7 +736,17 @@ jobs:
           plutil -lint build/ExportOptions.generated.plist
           echo "plist-path=build/ExportOptions.generated.plist" >> "$GITHUB_OUTPUT"
 
+      - name: Set up Ruby (fastlane)
+        if: inputs.use_fastlane
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          # Installs the bundle from the committed Gemfile.lock and caches
+          # it. The Ruby version comes from the repo (.ruby-version,
+          # .tool-versions, or the Gemfile's `ruby` line).
+          bundler-cache: true
+
       - name: Build signed archive
+        if: ${{ !inputs.use_fastlane }}
         env:
           XCODEPROJ: ${{ inputs.xcodeproj }}
           XCWORKSPACE: ${{ inputs.workspace }}
@@ -688,6 +806,29 @@ jobs:
           # an empty array under `set -u` is an unbound-variable error.
           xcodebuild archive "${ARGS[@]}" ${SETTINGS[@]+"${SETTINGS[@]}"}
 
+      - name: Run fastlane archive lane
+        # Replaces the xcodebuild archive/-exportArchive steps. Lane
+        # contract: read the env below; write the .ipa under build/export/
+        # (verified, uploaded, and sent to TestFlight) and the archive at
+        # build/<scheme>.xcarchive (dSYMs are zipped from it).
+        # KEYCHAIN_PATH / APPLE_API_KEY_PATH are empty in runner-keychain
+        # mode — the signing material already lives on the runner.
+        # BUILD_NUMBER is empty with build_number: project — leave
+        # CURRENT_PROJECT_VERSION alone.
+        if: inputs.use_fastlane
+        env:
+          KEYCHAIN_PATH: ${{ steps.keychain.outputs.keychain-path }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_PATH: ${{ steps.asc-key.outputs.p8-path }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          EXPORT_METHOD: ${{ inputs.export_method }}
+          BUILD_NUMBER: ${{ steps.buildnum.outputs.build-number }}
+          LANE: ${{ inputs.fastlane_archive_lane }}
+        run: |
+          set -euo pipefail
+          bundle exec fastlane "${LANE}"
+
       - name: Verify the SPM pins did not move (post-archive)
         if: inputs.spm_resolved_path != ''
         env:
@@ -697,6 +838,7 @@ jobs:
           git diff --exit-code -- "${SPM_RESOLVED}"
 
       - name: Export signed .ipa
+        if: ${{ !inputs.use_fastlane }}
         env:
           SCHEME: ${{ inputs.scheme }}
           SIGNING: ${{ inputs.signing }}

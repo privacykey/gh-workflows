@@ -201,6 +201,7 @@ The generic sequence:
   - `maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90` — v1.7.0
   - `softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228` — v3.0.2
   - `actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` — v7.0.1
+  - `ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b` — v1.321.0
 - Sparkle CLI: version `2.9.5`, tarball SHA-256
   `015336b601493e05c237964954bff6191370003d94edefe663724c88840d73cc`.
   Bump `sparkle_version` and `sparkle_sha256` together.
