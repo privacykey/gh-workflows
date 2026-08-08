@@ -30,6 +30,9 @@ const HUB = arg('--hub') ?? process.cwd()
 const CHECK = process.argv.includes('--check')
 const AGGREGATE = (arg('--aggregate') ?? '').split(',').map((s) => s.trim()).filter(Boolean)
 const TARGET = arg('--target') ?? 'README.md'
+// Collapsed on a personal profile, where this is one section among many.
+// Expanded on an org profile, where the project list IS the page.
+const COLLAPSED = arg('--collapsed') !== 'false'
 
 const die = (m) => { console.error(`✗ ${m}`); process.exit(1) }
 
@@ -119,8 +122,10 @@ outputs.set('STATUS.md', md.trimEnd() + '\n')
 // ---------------------------------------------------------------- rendered region
 // No GitHub alerts in here — they don't render inside a <details> block.
 const scope = AGGREGATE.length ? 'every project I maintain' : `every ${hub.owner} project`
-let region = `<details>\n  <summary><b>📋 Project status</b> — what I promise for ${scope} (reviewed ${hub.reviewed})</summary>\n  <p>\n\n`
-  + `Each badge links to the full promise. Private and pre-announcement projects aren't listed.\n\n`
+let region = COLLAPSED
+  ? `<details>\n  <summary><b>📋 Project status</b> — what I promise for ${scope} (reviewed ${hub.reviewed})</summary>\n  <p>\n\n`
+  : `## Projects\n\nWhat I promise for ${scope}, and what I don't. Reviewed ${hub.reviewed}.\n\n`
+region += `Each badge links to the full promise. Private and pre-announcement projects aren't listed.\n\n`
   + `| | Tier | What it means |\n| - | - | - |\n`
   + Object.entries(tiers).sort((a, b) => a[1].order - b[1].order)
       .filter(([n]) => allListed.some((e) => e.tier === n))
@@ -141,7 +146,7 @@ for (const [gk, g] of Object.entries(groups).sort((a, b) => a[1].order - b[1].or
   }
   region += `\n`
 }
-region += `  </p>\n</details>`
+region += COLLAPSED ? `  </p>\n</details>` : `See [STATUS.md](STATUS.md) for what each tier promises.`
 
 const START = '<!-- STATUS:START -->'
 const END = '<!-- STATUS:END -->'

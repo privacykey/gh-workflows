@@ -30,6 +30,14 @@ on:
         type: string
         required: false
         default: 'README.md'
+      collapsed:
+        description: >-
+          Render the section inside a <details> block. True on a personal
+          profile, where this is one section among many; false on an org
+          profile, where the project list is the page.
+        type: boolean
+        required: false
+        default: true
       drift:
         description: 'Check claimed tiers against reality and open a report PR.'
         type: boolean
@@ -73,6 +81,7 @@ jobs:
           node .status-action/actions/project-status/build.mjs \
             --hub "$GITHUB_WORKSPACE" \
             --target "${{ inputs.target }}" \
+            --collapsed "${{ inputs.collapsed }}" \
             ${{ inputs.aggregate && format('--aggregate ''{0}''', inputs.aggregate) || '' }}
 
       - name: Commit if anything changed
