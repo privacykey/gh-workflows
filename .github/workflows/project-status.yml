@@ -1,0 +1,157 @@
+name: Project status
+
+# Regenerates one account's status badges, STATUS.md and profile section from
+# its own status.json, then reports what has drifted from reality.
+#
+# Each account calls this from its own hub, so a privacykey badge is served
+# from a privacykey repo and no credential reaches across identities.
+#
+# Caller:
+#   jobs:
+#     status:
+#       uses: privacykey/gh-workflows/.github/workflows/project-status.yml@v1
+#       secrets:
+#         status-token: ${{ secrets.STATUS_TOKEN }}
+
+on:
+  workflow_call:
+    inputs:
+      aggregate:
+        description: >-
+          Comma-separated hubs whose listed repos also appear in this hub's
+          rendered section, e.g. "privacykey/.github,adamXbot/.github". Read
+          over plain HTTPS with no token — every hub is public and already
+          withholds its private repos.
+        type: string
+        required: false
+        default: ''
+      target:
+        description: 'Markdown file carrying the STATUS markers.'
+        type: string
+        required: false
+        default: 'README.md'
+      collapsed:
+        description: >-
+          Render the section inside a <details> block. True on a personal
+          profile, where this is one section among many; false on an org
+          profile, where the project list is the page.
+        type: boolean
+        required: false
+        default: true
+      drift:
+        description: 'Check claimed tiers against reality and open a report PR.'
+        type: boolean
+        required: false
+        default: true
+    secrets:
+      status-token:
+        description: >-
+          Read-only token for THIS account only. Needed to see private repos;
+          without it the drift check is skipped and says so. Deliberately not
+          cross-account — a leak should cost one identity, not three.
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  build:
+    name: Regenerate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the shared status action
+        uses: actions/checkout@v4
+        with:
+          repository: privacykey/gh-workflows
+          ref: v1
+          path: .status-action
+          sparse-checkout: actions/project-status
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Fails on a malformed status.json before writing anything, so a bad edit
+      # can never leave the hub half-regenerated.
+      - name: Build
+        run: |
+          node .status-action/actions/project-status/build.mjs \
+            --hub "$GITHUB_WORKSPACE" \
+            --target "${{ inputs.target }}" \
+            --collapsed "${{ inputs.collapsed }}" \
+            ${{ inputs.aggregate && format('--aggregate ''{0}''', inputs.aggregate) || '' }}
+
+      - name: Commit if anything changed
+        run: |
+          rm -rf .status-action
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "Nothing to commit."
+            exit 0
+          fi
+          git config --local user.email "actions@noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add badges STATUS.md "${{ inputs.target }}"
+          git commit -m ":clipboard: Regenerate project status"
+          git push
+
+  drift:
+    name: Check against reality
+    runs-on: ubuntu-latest
+    needs: build
+    if: inputs.drift && github.event_name != 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the shared status action
+        uses: actions/checkout@v4
+        with:
+          repository: privacykey/gh-workflows
+          ref: v1
+          path: .status-action
+          sparse-checkout: actions/project-status
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Derive findings
+        id: run
+        env:
+          STATUS_TOKEN: ${{ secrets.status-token }}
+        run: |
+          if [ -z "$STATUS_TOKEN" ]; then
+            echo "::warning::status-token not set — private repos can't be read, so drift is skipped."
+            exit 0
+          fi
+          node .status-action/actions/project-status/drift.mjs --hub "$GITHUB_WORKSPACE" > /tmp/report.md
+          cat /tmp/report.md >> "$GITHUB_STEP_SUMMARY"
+          if grep -qE 'thing\(s\) to fix|second look' /tmp/report.md; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # One PR, force-updated in place. Skipping a week costs nothing — the next
+      # run rewrites it to current reality instead of stacking up a backlog.
+      - name: Open or update the report PR
+        if: steps.run.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH=chore/status-report
+          rm -rf .status-action
+          git config --local user.email "actions@noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git checkout -B "$BRANCH"
+          mkdir -p .github/status
+          cp /tmp/report.md .github/status/report.md
+          git add .github/status/report.md
+          git commit -m ":clipboard: Status report"
+          git push -f origin "$BRANCH"
+          if gh pr view "$BRANCH" --json number >/dev/null 2>&1; then
+            gh pr edit "$BRANCH" --body-file /tmp/report.md
+          else
+            gh pr create --base "${{ github.event.repository.default_branch }}" --head "$BRANCH" \
+              --title "Project status — things to fix" --body-file /tmp/report.md
+          fi

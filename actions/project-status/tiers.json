@@ -1,0 +1,72 @@
+{
+  "_comment": "Canonical tier and group definitions, shared by every status hub. Kept here rather than duplicated into each hub's status.json so three copies can't drift apart — a tier's promise is a claim made on ~24 public repos and it has to read the same everywhere.",
+
+  "tiers": {
+    "Active": {
+      "emoji": "🟢",
+      "color": "2ea043",
+      "order": 1,
+      "oneLiner": "shipping now; installable today and still gaining capability",
+      "promise": "I'm in this most weeks. Features are landing, so expect breaking changes between releases — read the changelog before you upgrade. I read issues and generally act on them quickly."
+    },
+    "Building": {
+      "emoji": "🚧",
+      "color": "8250df",
+      "order": 2,
+      "oneLiner": "under construction; nothing released, nothing promised",
+      "promise": "Being built. Nothing is released, nothing is supported, and it can change shape or disappear without notice. Don't build on it — watch the repo if you want to know when it ships."
+    },
+    "Maintained": {
+      "emoji": "🛡️",
+      "color": "1f6feb",
+      "order": 3,
+      "oneLiner": "feature-complete; kept working and patched, not grown",
+      "promise": "I'm not adding features here. It still gets security patches, dependency bumps and fixes for anything that breaks. Safe to depend on for exactly what it does today."
+    },
+    "Parked": {
+      "emoji": "📦",
+      "color": "8b949e",
+      "order": 4,
+      "oneLiner": "done or paused; it works, nothing is watching it",
+      "promise": "Finished or paused. It does what the README says and I left it working, but nothing is watching it, so it could rot quietly. I'll answer a question. I'm not promising a fix or a release."
+    },
+    "Unmaintained": {
+      "emoji": "⚠️",
+      "color": "d29922",
+      "order": 5,
+      "oneLiner": "I'm not watching this one",
+      "promise": "I'm not watching this one. Something it advertises may already be broken, and bugs won't be fixed on a schedule. Read it, fork it, vendor it — this says nothing about whether the code is any good."
+    },
+    "Reference": {
+      "emoji": "📖",
+      "color": "1b7c83",
+      "order": 6,
+      "oneLiner": "content, not software; graded on how current it is",
+      "promise": "The content was accurate as of the date shown. Links and details go stale."
+    },
+    "Fork": {
+      "emoji": "🍴",
+      "color": "6e7681",
+      "order": 7,
+      "oneLiner": "someone else's project; the real one is upstream",
+      "promise": "Not my project and not maintained by me. The canonical version is upstream — go there for issues, releases and support."
+    },
+    "Archived": {
+      "emoji": "📁",
+      "color": "6639ba",
+      "order": 8,
+      "oneLiner": "read-only; kept for reference",
+      "promise": "Archived on GitHub and read-only. Kept so links don't rot."
+    }
+  },
+
+  "groups": {
+    "privacy": { "title": "privacy tools", "order": 1 },
+    "apps": { "title": "apps", "order": 2 },
+    "tools": { "title": "tools & utilities", "order": 3 },
+    "infra": { "title": "shared infrastructure", "order": 4 },
+    "sites": { "title": "sites & docs", "order": 5 },
+    "content": { "title": "lists & content", "order": 6 },
+    "archive": { "title": "forks & archive", "order": 7 }
+  }
+}
