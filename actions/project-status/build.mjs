@@ -52,7 +52,12 @@ const load = (owner, repos, source) => {
     if (!groups[r.group]) die(`${full}: unknown group "${r.group}"`)
     if (!DISTRIBUTIONS.includes(r.distribution)) die(`${full}: bad distribution "${r.distribution}"`)
     if (typeof r.public !== 'boolean' || typeof r.listed !== 'boolean') die(`${full}: "public" and "listed" must be booleans`)
-    // The clause that stops an unreleased product reaching a public page.
+    // A hub lives in a PUBLIC repo, so status.json is browsable by anyone. An
+    // earlier version tracked private repos here and withheld them from the
+    // rendered output — but the source file itself named 25 unreleased
+    // projects. Withholding a private repo from the badges is not enough; it
+    // must not be in the file at all.
+    if (!r.public) die(`${full}: private repos must not appear in a public hub's status.json — remove the entry`)
     if (r.listed && !r.public) die(`${full}: listed:true but public:false`)
     if (r.tier === 'Fork' && !r.canonical) die(`${full}: Fork requires "canonical"`)
     out.push({ owner, repo, full, source, ...r })
