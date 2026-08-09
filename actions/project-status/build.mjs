@@ -109,7 +109,11 @@ for (const [gk, g] of Object.entries(groups).sort((a, b) => a[1].order - b[1].or
   md += `## ${g.title}\n\n`
   for (const e of inGroup) {
     const t = tiers[e.tier]
-    md += `### ${e.repo}\n\n${t.emoji} **${e.tier}** — ${t.oneLiner}\n\n${t.promise}\n\n`
+    // Explicit anchor alongside the generated heading slug. GitHub lowercases
+    // heading anchors, so a README linking #AUcoverage silently misses and
+    // dumps the reader at the top of the file. Emitting the exact-case id too
+    // means both spellings resolve, and the class of bug stops being possible.
+    md += `<a id="${e.repo}"></a>\n\n### ${e.repo}\n\n${t.emoji} **${e.tier}** — ${t.oneLiner}\n\n${t.promise}\n\n`
     if (e.distribution === 'appstore-closed') md += `_Ships on the App Store; source is closed._\n\n`
     if (e.submissions) md += `_Submissions are ${e.submissions}._\n\n`
     if (e.seekingMaintainer) md += `**Open to a new maintainer** — get in touch.\n\n`
