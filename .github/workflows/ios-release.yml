@@ -520,6 +520,10 @@ jobs:
         if: inputs.use_fastlane
         env:
           LANE: ${{ inputs.fastlane_test_lane }}
+          # A project whose Release build needs DEVELOPMENT_TEAM set — even
+          # unsigned — cannot get it any other way here. team_id is an input,
+          # not a secret, so passing it keeps this job secret-free.
+          TEAM_ID: ${{ inputs.team_id }}
         run: |
           set -euo pipefail
           bundle exec fastlane "${LANE}"
@@ -841,6 +845,18 @@ jobs:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           EXPORT_METHOD: ${{ inputs.export_method }}
+          # gym rejects "app-store-connect" — that is Xcode 15.4+'s name for
+          # the method, and fastlane's own allow-list still only accepts
+          # "app-store". A lane that passes EXPORT_METHOD straight to gym, or
+          # that lets gym read an ExportOptions plist declaring the new name,
+          # fails at export AFTER the signed archive has been built. Lanes get
+          # the gym-safe spelling here so they do not each have to translate.
+          GYM_EXPORT_METHOD: ${{ inputs.export_method == 'app-store-connect' && 'app-store' || inputs.export_method }}
+          # The team id reaches the lane. Without this a fastlane archive has
+          # no way to learn it: the team_id input feeds only the pipeline's own
+          # xcodebuild path and the plist it generates, neither of which a lane
+          # in fastlane mode ever sees.
+          TEAM_ID: ${{ inputs.team_id }}
           BUILD_NUMBER: ${{ steps.buildnum.outputs.build-number }}
           LANE: ${{ inputs.fastlane_archive_lane }}
         run: |
