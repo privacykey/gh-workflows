@@ -1,23 +1,58 @@
 # gh-workflows
 
-Reusable GitHub Actions workflows and composite actions for the privacykey
-macOS app portfolio. One pipeline, one place to fix it.
+Reusable GitHub Actions workflows and composite actions for the macOS and iOS
+app repositories across my privacykey and AdamXweb accounts. One pipeline, one
+place to fix it.
 
-## Contents
+[![Project status](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fprivacykey%2F.github%2Fmain%2Fbadges%2Fgh-workflows.json)](https://github.com/privacykey/.github/blob/main/STATUS.md#gh-workflows) [![Licence](https://img.shields.io/github/license/privacykey/gh-workflows?label=licence)](LICENSE)
+
+<!-- disclosure:start -->
+> [!WARNING]
+> **Project status.** The badge above is generated from [the privacykey status list](https://github.com/privacykey/.github/blob/main/STATUS.md), which says what I promise for this project and every other one.
+<!-- disclosure:end -->
+
+---
+
+Nothing here is installed or run on its own. Other repositories call into it,
+so quiet is the intended state: a shared workflow nobody has touched in
+months is one that is still doing its job. Changes land here only when a
+consumer needs something new, or when a pin needs bumping.
+
+## What's here
 
 | Path | What it is |
 |---|---|
-| `.github/workflows/macos-sparkle-release.yml` | Tag-triggered release: test gate → sign → notarize → DMG → appcast → GitHub Release → optional Homebrew cask PR against the tap |
-| `.github/workflows/macos-app-ci.yml` | Push/PR CI: unsigned build + tests, zero secrets |
-| `actions/setup-apple-keychain` | Ephemeral keychain + Developer ID cert import (`-T codesign`, `set-key-partition-list`, masked password) |
+| `.github/workflows/macos-sparkle-release.yml` | Tag-triggered macOS release: test gate → sign → notarize → DMG → appcast → GitHub Release → optional Homebrew cask PR against the tap |
+| `.github/workflows/macos-app-ci.yml` | Push/PR CI for macOS apps: unsigned build + tests, zero secrets |
+| `.github/workflows/ios-release.yml` | iOS archive/TestFlight: unsigned validate gate → signed archive → .ipa + dSYM artefacts → optional `altool` upload; two signing modes (self-hosted runner keychain, or hosted cert import) |
+| `.github/workflows/project-status.yml` | Regenerates one account's status badges, `STATUS.md` and profile section from its own `status.json`, then reports what has drifted |
+| `actions/assert-trusted-runner` | Fail-closed guard: on a self-hosted runner, refuses to continue unless the repository is private and the pull request is not from a fork |
+| `actions/setup-apple-keychain` | Ephemeral keychain + certificate import (`-T codesign`, `set-key-partition-list`, masked password) |
 | `actions/write-asc-api-key` | Stages the App Store Connect `.p8` as a mode-600 file |
 | `actions/install-sparkle-cli` | Pinned Sparkle release tarball with SHA-256 verification |
 | `actions/publish-gh-pages-file` | Worktree-based single-file publish to a branch (appcast.xml → gh-pages) |
-| `actions/assert-trusted-runner` | Fail-closed guard: on a self-hosted runner, refuses to continue unless the repository is private and the pull request is not from a fork |
+| `actions/project-status` | The Node scripts and canonical tier definitions behind `project-status.yml` |
 
-## Using the release workflow
+## What consumes this
 
-A consumer `release.yml` is ~15 lines:
+Six repositories call in today — that is a code search across the privacykey,
+adamXbot and AdamXweb accounts, public and private repositories both. The two
+public ones:
+
+| Repository | Uses |
+|---|---|
+| [privacykey/privacycommand](https://github.com/privacykey/privacycommand) | `macos-sparkle-release.yml@v1`, `macos-app-ci.yml@v1` |
+| [privacykey/.github](https://github.com/privacykey/.github) | `project-status.yml@v1` |
+
+The other four are private and are not linked here. Between them they use
+`ios-release.yml@v1` (one repo) and `assert-trusted-runner@v1` (all four —
+across nine workflows in total, since one repo calls the guard from six).
+
+## How a consumer uses it
+
+A caller is thin by design — the pipeline lives here, the build script and
+the version number stay in the consumer repo. A macOS `release.yml` is about
+fifteen lines:
 
 ```yaml
 name: Release
@@ -39,239 +74,77 @@ jobs:
     secrets: inherit
 ```
 
-Notes on that snippet:
+`secrets: inherit` is not optional advice when `SPARKLE_PRIVATE_KEY` lives in
+the `macos-signing` environment: explicitly mapped secrets resolve in the
+caller's context, which has no environment, and come back empty.
 
-- **`secrets: inherit`** is the recommended mode. The release job inside the
-  reusable workflow declares `environment: macos-signing`; environment
-  secrets (`SPARKLE_PRIVATE_KEY` lives there) only resolve inside that job.
-  Explicit `secrets:` mappings are resolved in the *caller's* context, which
-  has no environment, and would come back empty. If all your secrets are
-  repo/org-scoped, explicit mapping works too.
-- **`permissions: contents: write`** on the caller is required — a called
-  workflow can only reduce the caller's token permissions, never raise them.
-- **`concurrency` in the caller** is deliberate duplication: GitHub's
-  handling of workflow-level `concurrency` inside a *called* workflow is
-  inconsistent, so both sides declare it.
-- The `macos-signing` environment is auto-created (unprotected) on first
-  run. Add a **required-reviewers rule** to it so releases pause for human
-  approval before any secret is read. Tests run *before* that gate.
+- **macOS** — inputs, the release-script env contract, the Homebrew cask PR
+  flow, the gen-1 → gen-3 secret rename and the migration sequence:
+  [docs/macos-release.md](docs/macos-release.md).
+- **iOS** — the two signing modes, fastlane mode, secrets by mode, inputs:
+  [docs/ios-release.md](docs/ios-release.md).
+- **Self-hosted runners** — how to opt in, and the private-repositories-only
+  rule the workflows enforce:
+  [docs/self-hosted-runners.md](docs/self-hosted-runners.md).
+- **Project status** — called from an account's own hub repo, with a
+  read-only token scoped to that account:
 
-Frequently used inputs (see the workflow header for the full list and the
-release-script contract):
+  ```yaml
+  jobs:
+    status:
+      uses: privacykey/gh-workflows/.github/workflows/project-status.yml@v1
+      secrets:
+        status-token: ${{ secrets.STATUS_TOKEN }}
+  ```
 
-| Input | Default | Notes |
-|---|---|---|
-| `xcodeproj` | — (required) | Path to the `.xcodeproj` |
-| `scheme` | — (required) | Also assumed to be the target name |
-| `app_name` | scheme | Used in the DMG filename |
-| `uses_xcodegen` | `false` | `brew install xcodegen` + `xcodegen generate` first |
-| `sparkle_version` / `sparkle_sha256` | `2.9.5` / pinned digest | Bump together, always |
-| `dmg_name` | `{app}-{version}.dmg` | Verified against the release script's output |
-| `cask_name` / `tap_repo` | empty | Both set (plus `HOMEBREW_TAP_TOKEN`) enables the cask PR flow (see below); template lives at `packaging/homebrew/<cask_name>.rb` |
-| `appcast_branch` | `gh-pages` | Where appcast.xml is pushed |
-| `runner` | `macos-15` | Plain label, or a JSON array string for the self-hosted fleet — see [Self-hosted runners](#self-hosted-runners) |
-| `release_runner` | same as `runner` | Set separately to keep signing off the ordinary CI machine |
-| `macos_runner` | empty | Deprecated, superseded by `runner`; a non-empty value still wins so existing callers keep working |
-| `publish_dsym` | `false` | `true` attaches the dSYM zip to the public Release (it is always kept as a private 365-day workflow artefact) |
-| `release_script` | `./scripts/release.sh` | Must honour the env contract below |
-| `appcast_script` | empty (built-in) | Only set if your repo needs a custom appcast |
+## The version contract
 
-### Release script contract
+- **Consumers pin by tag.** `...@v1` is the moving major tag and is what
+  every consumer above uses. Exact tags `v1.0.0`, `v1.0.1`, `v1.0.2`,
+  `v1.1.0` and `v1.2.0` also exist. There are no GitHub Releases — the tags
+  are the whole contract.
+- **`v1` is moved deliberately**, as the release action. It currently points
+  at the same commit as `v1.2.0`.
+- **An exact pin is not a full freeze.** Inside these workflows the composite
+  actions are referenced as `privacykey/gh-workflows/actions/<name>@v1`, and
+  GitHub resolves those refs at run time independently of the tag the
+  *workflow* was pinned at. A caller on `v1.1.0` therefore gets that
+  workflow, but whatever `v1` currently points at for the actions it calls.
+  A relative path cannot be used instead, because the job's checkout is the
+  consumer repo, not this one.
+- **Third-party actions are SHA-pinned** with a version comment — currently
+  `actions/checkout`, `actions/upload-artifact`, `maxim-lobanov/setup-xcode`,
+  `softprops/action-gh-release` and `ruby/setup-ruby`. The digests live in
+  the workflow files rather than being repeated here, so they cannot drift
+  out of sync with what actually runs. `project-status.yml` is the exception:
+  it runs on `ubuntu-latest` and uses floating `actions/checkout@v4` /
+  `actions/setup-node@v4`.
+- **The Sparkle CLI** is pinned to version `2.9.5`, and its tarball digest is
+  verified before extraction. Bump the `sparkle_version` and `sparkle_sha256`
+  inputs together or the check fails, by design.
 
-The consumer repo owns its build script (so releases can be dry-run
-locally). The workflow invokes it with:
+## Changing it safely
 
-- **reads (env):** `APPLE_SIGNING_IDENTITY`, `APPLE_API_KEY_PATH`,
-  `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`, `KEYCHAIN_PATH`, `SCHEME`
-- **writes:** `dist/<app>-<version>.dmg` (signed + notarized + stapled),
-  optionally `symbols/<app>-<version>.app.dSYM.zip`
+The blast radius of an edit here is every consumer above, and it lands the
+moment `v1` moves — not when `main` moves. Pushing to `main` changes nothing
+for consumers, because both their pins and this repo's internal action
+references resolve through tags. So merge to `main` freely, then move `v1` as
+a separate, deliberate act once you are satisfied. Before that:
 
-A typical implementation: xcodebuild archive → export → notarytool
-submit --wait → staple → hdiutil DMG → codesign + notarize + staple the
-DMG.
+- Run `just lint` — `actionlint` over the workflows plus a YAML parse of
+  every `actions/*/action.yml`. `actionlint` has to be installed locally,
+  because there is no CI in this repository: every workflow here is
+  `workflow_call`-only, so none of them can run on a push.
+- Removing or renaming an input is a breaking change for a caller pinned at
+  `@v1`, and it will break at run time rather than at merge time. The
+  deprecated `macos_runner` input is the pattern to copy: keep the old name
+  working, document the replacement, migrate callers, remove later.
+- Adding a `secrets:` entry to `macos-app-ci.yml` is out of bounds. It
+  declares none and must never gain any — that is what makes it safe to run
+  on pull requests.
+- Design rationale for the current shape:
+  [docs/design-decisions.md](docs/design-decisions.md).
 
-### Homebrew cask updates (PR-based)
+## Licence
 
-When `cask_name`, `tap_repo`, and the `HOMEBREW_TAP_TOKEN` secret are all
-set, the release job:
-
-1. renders `packaging/homebrew/<cask_name>.rb` from the consumer repo's
-   template, substituting `@@VERSION@@` / `@@SHA256@@` / `@@URL@@`;
-2. pushes the rendered cask to a **`release/<cask_name>-<version>`
-   branch** in the tap repo;
-3. opens a **pull request** in the tap (via `gh`, authenticated with
-   `HOMEBREW_TAP_TOKEN`) whose body links the triggering GitHub Release
-   and carries the version/SHA-256/DMG details.
-
-Nothing is ever pushed to the tap's default branch. Merging the tap PR is
-the publish action — that's when `brew upgrade --cask <cask_name>` starts
-seeing the new version. Re-running a release force-refreshes the same
-`release/<cask_name>-<version>` branch and reuses the already-open PR
-instead of stacking duplicates. If any of the three settings is missing,
-the step skips cleanly and the rest of the release is unaffected.
-
-Token requirements: `HOMEBREW_TAP_TOKEN` must be a fine-grained PAT
-scoped to **only** the tap repo, with **Contents: read & write** *and*
-**Pull requests: read & write**. A token that only carries Contents
-fails at `gh pr create`.
-
-## Using the CI workflow
-
-```yaml
-name: CI
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-jobs:
-  ci:
-    uses: privacykey/gh-workflows/.github/workflows/macos-app-ci.yml@v1
-    with:
-      xcodeproj: MyApp/MyApp.xcodeproj
-      scheme: MyApp
-      uses_xcodegen: true
-```
-
-No secrets, `CODE_SIGNING_ALLOWED=NO`, xcresult uploaded as a 7-day
-artifact. `test_script` overrides the default `xcodebuild test` invocation
-if a repo needs something custom.
-
-## Secret names: gen-1 → gen-3 mapping
-
-Repos that predate the current secret scheme use gen-1 names. Same
-*values* where noted — mostly this is a rename plus swapping Apple-ID
-notarization for an App Store Connect API key.
-
-| gen-1 (old) | gen-3 (this repo) | Migration |
-|---|---|---|
-| `APPLE_DEVELOPER_ID_CERT` | `APPLE_CERTIFICATE` | Rename — same base64 `.p12` |
-| `APPLE_DEVELOPER_ID_PASSWORD` | `APPLE_CERTIFICATE_PASSWORD` | Rename — same passphrase |
-| *(none — script probed the keychain)* | `APPLE_SIGNING_IDENTITY` | New: the exact `"Developer ID Application: … (TEAMID)"` string |
-| `APPLE_NOTARY_USER` (Apple ID) | *(retired)* | Replaced by ASC API key auth |
-| `APPLE_NOTARY_PASSWORD` (app-specific password) | *(retired)* | Replaced by ASC API key auth |
-| `APPLE_NOTARY_TEAM_ID` | *(retired)* | Team ID is derived from the signing identity |
-| *(none)* | `APPLE_API_KEY` | New: full PEM contents of the ASC `.p8` |
-| *(none)* | `APPLE_API_KEY_ID` | New: 10-char Key ID |
-| *(none)* | `APPLE_API_ISSUER` | New: Issuer UUID |
-| `SPARKLE_PRIVATE_KEY` | `SPARKLE_PRIVATE_KEY` | Unchanged — but move it into the `macos-signing` environment |
-| *(none)* | `HOMEBREW_TAP_TOKEN` (optional) | Fine-grained PAT scoped to the tap repo only — Contents **and** Pull requests, read & write (the cask lands as a tap PR, not a direct push) |
-
-Why the ASC API key beats Apple-ID + app-specific password: revocable
-per-key in one click, immune to Apple ID 2FA prompts, and org-shareable
-without sharing an account.
-
-## Migrating a consumer repo
-
-Repo-specific migration steps live in each consumer repo's migration PR.
-The generic sequence:
-
-1. Mint an App Store Connect API key; add `APPLE_API_KEY`,
-   `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`. Rename any gen-1 secrets per
-   the mapping table above.
-2. Create the `macos-signing` environment; move `SPARKLE_PRIVATE_KEY`
-   into it; add a required-reviewers rule.
-3. Bring the repo's release script onto the env contract above
-   (notarytool `--key/--key-id/--issuer`; honour `KEYCHAIN_PATH` via
-   `codesign --keychain` on any direct `codesign` calls).
-4. Replace `release.yml` with the ~15-line caller (`secrets: inherit`)
-   and `ci.yml` with the `macos-app-ci.yml` caller.
-5. If the app ships a Homebrew cask: add the
-   `packaging/homebrew/<cask_name>.rb` template, set `cask_name` /
-   `tap_repo`, and mint a `HOMEBREW_TAP_TOKEN` PAT (Contents *and* Pull
-   requests, read & write). After each release, merging the tap PR is
-   the cask publish step.
-6. Retire the gen-1 secrets (`APPLE_NOTARY_*`, `APPLE_DEVELOPER_ID_*`)
-   once the new flow is proven.
-
-## Pinning model
-
-- **Consumers pin this repo's workflows by tag:** `...@v1`. Cut annotated
-  tags here (`v1`, `v1.x.y`) and move the major tag deliberately.
-- **Inside the workflows, the composite actions are referenced as
-  `privacykey/gh-workflows/actions/<name>@main`.** GitHub resolves those
-  refs at run time, independently of the tag the *workflow* was pinned at —
-  a relative path can't be used because the job's checkout is the consumer
-  repo, not this one. Consequence: a push to `main` here changes behaviour
-  under consumers pinned to `@v1`. Treat `main` as release-stable, or (more
-  robust) update the `@main` refs to `@v1` as part of cutting each release
-  tag so the whole dependency chain is tag-pinned.
-- Third-party actions are SHA-pinned with a version comment. Current pins:
-  - `actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10` — v6.0.3
-  - `maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90` — v1.7.0
-  - `softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228` — v3.0.2
-  - `actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` — v7.0.1
-  - `ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b` — v1.321.0
-- Sparkle CLI: version `2.9.5`, tarball SHA-256
-  `015336b601493e05c237964954bff6191370003d94edefe663724c88840d73cc`.
-  Bump `sparkle_version` and `sparkle_sha256` together.
-
-## Self-hosted runners
-
-Both workflows default to GitHub-hosted images. Pointing one at self-hosted
-hardware is an explicit, per-consumer opt-in — pass a JSON array of labels:
-
-```yaml
-    with:
-      runner: '["self-hosted", "macOS", "ARM64", "repo-ci"]'
-```
-
-**The rule the workflows enforce: self-hosted runners are for private
-repositories only.**
-
-The reasoning is short. A self-hosted runner is a persistent machine that is
-not wiped between jobs, so a job that runs on it can read whatever the
-previous job left, plus whatever else that account can reach. A public
-repository accepts pull requests from anyone, and a pull request is a
-proposal to run the author's code. Meanwhile Actions minutes for public
-repositories are free — so a public repository on owned hardware takes on
-the entire risk in exchange for nothing.
-
-Two independent gates enforce it:
-
-1. **Job-level `if:`** — rejects fork pull requests *before a runner is
-   allocated*, so fork code never reaches the host at all.
-2. **`actions/assert-trusted-runner`** — the first step of every job, before
-   checkout. Re-checks visibility and fork status on the runner itself and
-   fails the job if either is wrong. On a GitHub-hosted runner it is a no-op,
-   which is what lets it live in a shared workflow.
-
-Visibility is read from the event payload and **fails closed**: if it cannot
-be determined, the job stops.
-
-Two things the gates deliberately do *not* do:
-
-- They do not make a self-hosted runner safe for code from people you don't
-  trust. Anyone who can push a branch to a private repository can run code on
-  the host on purpose — the gates keep out strangers, not collaborators. Keep
-  the runner account free of credentials and personal data regardless.
-- They do not replace the account boundary. `repo-ci` and `release-signing`
-  are labels; labels route jobs, they don't isolate them. Separate macOS
-  accounts do. A `repo-ci` runner must never hold a distribution certificate.
-
-Consumers on the fleet also inherit two behaviour changes, both automatic:
-`maxim-lobanov/setup-xcode` is skipped (it re-points the *machine's* selected
-Xcode, which on a shared host would reach into every other repository's
-builds), and `xcodegen` is expected to be preinstalled rather than
-`brew install`ed per job. The workflow checks for it and fails with a clear
-message if it is missing.
-
-## Design decisions (short version)
-
-- **Tests before secrets.** The `test` job has no secrets and no
-  environment; the `macos-signing` approval gate sits between it and the
-  `release` job.
-- **Fail closed, not degraded.** No graceful-degradation ladder (no cert
-  → unsigned; no ASC key → signed-not-notarized): for DMG-shipping
-  consumer apps, a half-signed public release is worse than a failed run.
-  All signing secrets are `required`.
-- **No nested Sparkle re-sign step.** The xcodebuild archive/export path
-  signs nested code (Sparkle's XPC services included) correctly on its
-  own; a separate re-sign step is only needed for hand-assembled .app
-  bundles, which this pipeline does not support.
-- **Build scripts stay in consumer repos** (local dry-runs), the
-  orchestration lives here. Appcast generation is built in, including
-  key-format validation.
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
