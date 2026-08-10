@@ -1,14 +1,7 @@
-<!--
-README patch for privacykey/gh-workflows.
+# iOS release workflow
 
-1. Add this row to the Contents table (after the macos-app-ci.yml row):
-
-| `.github/workflows/ios-release.yml` | iOS archive/TestFlight: unsigned validate gate → signed archive → .ipa + dSYM artefacts → optional `altool` TestFlight upload; dual signing modes (self-hosted runner keychain / hosted cert import) |
-
-2. Insert everything below as a new top-level section after
-   "## Using the CI workflow" and before "## Secret names: gen-1 → gen-3
-   mapping".
--->
+`ios-release.yml`, in detail. The short version and the caller pointers
+live in [the README](../README.md).
 
 ## Using the iOS release workflow
 
