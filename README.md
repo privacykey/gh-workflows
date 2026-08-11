@@ -101,10 +101,10 @@ caller's context, which has no environment, and come back empty.
 
 - **Consumers pin by tag.** `...@v1` is the moving major tag and is what
   every consumer above uses. Exact tags `v1.0.0`, `v1.0.1`, `v1.0.2`,
-  `v1.1.0` and `v1.2.0` also exist. There are no GitHub Releases — the tags
+  `v1.1.0`, `v1.2.0`, `v1.3.0`, `v1.3.1` and `v1.4.0` also exist. There are no GitHub Releases — the tags
   are the whole contract.
 - **`v1` is moved deliberately**, as the release action. It currently points
-  at the same commit as `v1.2.0`.
+  at the same commit as `v1.4.0`.
 - **An exact pin is not a full freeze.** Inside these workflows the composite
   actions are referenced as `privacykey/gh-workflows/actions/<name>@v1`, and
   GitHub resolves those refs at run time independently of the tag the
