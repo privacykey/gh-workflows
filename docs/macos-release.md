@@ -49,8 +49,10 @@ release-script contract):
 
 | Input | Default | Notes |
 |---|---|---|
-| `xcodeproj` | — (required) | Path to the `.xcodeproj` |
-| `scheme` | — (required) | Also assumed to be the target name |
+| `xcodeproj` | — | Path to the `.xcodeproj`. Optional **only** when `release_script` is set — see [Apps without an Xcode project](#apps-without-an-xcode-project) |
+| `scheme` | — | Required whenever `xcodeproj` is set; also assumed to be the target name |
+| `test_script` | empty | Replaces the built-in `xcodebuild test`. Required when `xcodeproj` is empty |
+| `version_plist` | empty | Info.plist to check the tag against when there is no project. Empty skips the check with a warning |
 | `app_name` | scheme | Used in the DMG filename |
 | `uses_xcodegen` | `false` | `brew install xcodegen` + `xcodegen generate` first |
 | `sparkle_version` / `sparkle_sha256` | `2.9.5` / pinned digest | Bump together, always |
@@ -107,6 +109,33 @@ Token requirements: `HOMEBREW_TAP_TOKEN` must be a fine-grained PAT
 scoped to **only** the tap repo, with **Contents: read & write** *and*
 **Pull requests: read & write**. A token that only carries Contents
 fails at `gh pr create`.
+
+## Apps without an Xcode project
+
+A SwiftPM package, a Makefile build, a shell script — anything producing a
+`.app` without an `.xcodeproj` — uses the same pipeline by leaving `xcodeproj`
+empty and owning both the build and the tests:
+
+```yaml
+    with:
+      app_name: "Runner Menu"              # required: normally defaults to scheme
+      test_script: ./run-tests.sh          # required: the built-in test step is xcodebuild
+      release_script: ./scripts/release.sh
+      version_plist: Resources/Info.plist  # optional tag cross-check
+```
+
+Signing, notarization, DMG, appcast, Release and the cask PR are unchanged.
+Only the steps that drive `xcodebuild` are skipped: the built-in test step, the
+unsigned Release build, and the `-showBuildSettings` version lookup.
+
+A preflight step rejects half-wired combinations before any secret is read — a
+missing `release_script` or `test_script`, `uses_xcodegen` with no project to
+generate, or an empty `app_name` that would produce a DMG called `-1.0.dmg`.
+
+`version_plist` must hold a literal version. `$(MARKETING_VERSION)` is resolved
+by Xcode at build time, so the workflow fails rather than comparing a tag
+against placeholder text. Omit it and the tag simply is not cross-checked,
+which warns rather than failing — a weaker release, not a broken one.
 
 ## Using the CI workflow
 
