@@ -193,8 +193,12 @@ on:
           required when export_options_path is empty. Also passed to
           xcodebuild as a DEVELOPMENT_TEAM override when non-empty — this
           is how repos that keep the team out of committed config (e.g. in
-          a gitignored xcconfig) inject it in CI; pass it from a repo
-          variable, e.g. team_id: ${{ vars.APPLE_TEAM_ID }}.
+          a gitignored xcconfig) inject it in CI; pass it from an
+          APPLE_TEAM_ID repository variable. Note the example cannot be
+          written with expression syntax here: GitHub evaluates every
+          "dollar-brace-brace" it finds, including inside a description, and
+          the vars context is not valid in this position — doing so makes the
+          whole file unparseable and every run dies before a job starts.
         type: string
         required: false
         default: ''
