@@ -55,15 +55,42 @@ on:
           "MyApp/MyApp.xcodeproj". With uses_xcodegen: true the
           project is generated (from project.yml in the same directory)
           before anything reads it.
+
+          Optional, but only when `release_script` is set: a package built
+          by its own script (SwiftPM, a Makefile, build-app.sh) has no
+          .xcodeproj for this workflow to drive. Supply `test_script` too,
+          since the built-in test step is an xcodebuild invocation.
         type: string
-        required: true
+        required: false
+        default: ''
       scheme:
         description: >-
           xcodebuild scheme. NOTE: the tag-verification step assumes the
           app target has the same name as the scheme (true for every
-          current consumer).
+          Xcode-project consumer). Not used when xcodeproj is empty.
         type: string
-        required: true
+        required: false
+        default: ''
+      test_script:
+        description: >-
+          Shell command replacing the built-in `xcodebuild test`, run from
+          the repo root with bash. Required when xcodeproj is empty, since
+          the default test step cannot run without a project — e.g.
+          "swift test" or "./run-tests.sh".
+        type: string
+        required: false
+        default: ''
+      version_plist:
+        description: >-
+          Info.plist to read CFBundleShortVersionString from when checking
+          that the tag matches the app version. Only consulted when
+          xcodeproj is empty; with a project the version comes from
+          xcodebuild -showBuildSettings. Leave empty to skip the check —
+          the workflow warns rather than failing, because a missing
+          cross-check is not itself a reason to block a release.
+        type: string
+        required: false
+        default: ''
       app_name:
         description: >-
           Product name used in the DMG filename. Defaults to the scheme.
@@ -246,6 +273,51 @@ jobs:
       - name: Assert trusted runner context
         uses: privacykey/gh-workflows/actions/assert-trusted-runner@v1
 
+      - name: Preflight input validation
+        # Pure input logic, before checkout and long before any secret is
+        # read, so a miswired caller fails in seconds with a message about
+        # the wiring rather than deep inside a build.
+        env:
+          XCODEPROJ: ${{ inputs.xcodeproj }}
+          SCHEME: ${{ inputs.scheme }}
+          APP_NAME: ${{ inputs.app_name }}
+          TEST_SCRIPT: ${{ inputs.test_script }}
+          RELEASE_SCRIPT: ${{ inputs.release_script }}
+          USES_XCODEGEN: ${{ inputs.uses_xcodegen }}
+        run: |
+          set -euo pipefail
+          fail=0
+
+          if [[ -n "${XCODEPROJ}" ]]; then
+            if [[ -z "${SCHEME}" ]]; then
+              echo "::error::scheme is required when xcodeproj is set"
+              fail=1
+            fi
+          else
+            # No project: the consumer's own script has to do the building,
+            # and the built-in xcodebuild test step cannot run at all.
+            if [[ -z "${RELEASE_SCRIPT}" ]]; then
+              echo "::error::xcodeproj is empty, so release_script must be set — there is nothing for this workflow to build otherwise"
+              fail=1
+            fi
+            if [[ -z "${TEST_SCRIPT}" ]]; then
+              echo "::error::xcodeproj is empty, so test_script must be set (e.g. 'swift test') — the built-in test step is an xcodebuild invocation"
+              fail=1
+            fi
+            if [[ "${USES_XCODEGEN}" == "true" ]]; then
+              echo "::error::uses_xcodegen requires xcodeproj — xcodegen generates a project this workflow would then not use"
+              fail=1
+            fi
+            # app_name normally falls back to scheme, which is empty here,
+            # and an empty product name silently yields a DMG called "-1.0.dmg".
+            if [[ -z "${APP_NAME}" ]]; then
+              echo "::error::app_name is required when xcodeproj is empty — it normally defaults to scheme, which is also empty"
+              fail=1
+            fi
+          fi
+
+          exit "${fail}"
+
       - name: Check out source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -288,7 +360,14 @@ jobs:
           cd "$(dirname "${XCODEPROJ}")"
           xcodegen generate
 
+      - name: Run tests (custom)
+        if: inputs.test_script != ''
+        env:
+          TEST_SCRIPT: ${{ inputs.test_script }}
+        run: bash -c "${TEST_SCRIPT}"
+
       - name: Run tests (unsigned)
+        if: inputs.test_script == ''
         env:
           XCODEPROJ: ${{ inputs.xcodeproj }}
           SCHEME: ${{ inputs.scheme }}
@@ -303,7 +382,11 @@ jobs:
 
       - name: Unsigned Release build
         # Catches Release-configuration-only build breakage before the
-        # environment approval gate fires and any secret is read.
+        # environment approval gate fires and any secret is read. Skipped
+        # without a project: a script-built app has no Release
+        # configuration for xcodebuild to select, and its release_script
+        # performs the equivalent build during the release job.
+        if: inputs.xcodeproj != ''
         env:
           XCODEPROJ: ${{ inputs.xcodeproj }}
           SCHEME: ${{ inputs.scheme }}
@@ -393,11 +476,46 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Releasing as ${TAG}"
 
+      - name: Verify tag matches app version (plist)
+        # No .xcodeproj to interrogate, so read the version straight from a
+        # committed Info.plist. Only meaningful when that plist holds a
+        # literal — a $(MARKETING_VERSION) placeholder resolves at build
+        # time and would compare as garbage, so bail rather than mislead.
+        if: inputs.xcodeproj == '' && inputs.version_plist != ''
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+          VERSION_PLIST: ${{ inputs.version_plist }}
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${TAG#v}"
+          PLIST_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${VERSION_PLIST}" 2>/dev/null || true)"
+          if [[ -z "${PLIST_VERSION}" ]]; then
+            echo "::error::could not read CFBundleShortVersionString from ${VERSION_PLIST}"
+            exit 1
+          fi
+          if [[ "${PLIST_VERSION}" == *'$('* ]]; then
+            echo "::error::${VERSION_PLIST} holds the build-time placeholder ${PLIST_VERSION}, which cannot be compared to a tag."
+            echo "::error::Point version_plist at a plist with a literal version, or leave it empty to skip this check."
+            exit 1
+          fi
+          if [[ "${TAG_VERSION}" != "${PLIST_VERSION}" ]]; then
+            echo "::error::tag ${TAG_VERSION} does not match CFBundleShortVersionString ${PLIST_VERSION} in ${VERSION_PLIST}"
+            exit 1
+          fi
+          echo "Tag ${TAG} matches ${VERSION_PLIST} (${PLIST_VERSION})."
+
+      - name: Skipping version cross-check
+        # Warn rather than fail: an absent cross-check is a weaker release,
+        # not a broken one, and refusing to ship over it would be worse.
+        if: inputs.xcodeproj == '' && inputs.version_plist == ''
+        run: echo "::warning::No xcodeproj and no version_plist — the tag was not checked against the app's version."
+
       - name: Verify tag matches Marketing Version
         # Info.plist carries $(MARKETING_VERSION) as a placeholder that
         # Xcode resolves at build time, so PlistBuddy can't see it — ask
         # xcodebuild for the resolved value. -showBuildSettings is a
         # read-only project load, not a build.
+        if: inputs.xcodeproj != ''
         env:
           TAG: ${{ steps.resolve.outputs.tag }}
           XCODEPROJ: ${{ inputs.xcodeproj }}
