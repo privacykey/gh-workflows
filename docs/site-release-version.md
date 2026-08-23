@@ -1,7 +1,7 @@
-# Site release version and deploy
+# Site release version
 
-`site-release-version.yml` and `site-deploy.yml`, in detail. The short
-version and the caller pointers live in [the README](../README.md).
+`site-release-version.yml`, in detail. The short version and the caller
+pointers live in [the README](../README.md).
 
 ## What it does
 
@@ -16,32 +16,38 @@ ships. `site-release-version.yml` keeps it honest from the product side:
    a glob; strips the glob's literal prefix to get the version.
 3. Writes `version.json` at the site root and rewrites the markers in
    every `*.html` under the site.
-4. Commits and pushes — only if something changed.
-5. Deploys with the site's own `just deploy`, if the Cloudflare secrets
-   are present and either something changed or the run was dispatched
-   by hand.
+4. Commits and pushes — only if something changed. Then it stops.
 
 A second run on the same releases changes nothing: no timestamp is
 written anywhere, so the hourly schedule does not produce hourly commits.
 
-`site-deploy.yml` is the ordinary deploy for an ordinary merge to `main`.
-Both are thin: the sync logic is `actions/site-release-version/sync.py`,
-the deploy is `actions/site-deploy`, and both reusable workflows fetch
-those actions from the same commit the workflow file itself came from.
+The workflow is thin: the logic is `actions/site-release-version/sync.py`,
+and the workflow fetches that action from the same commit the workflow
+file itself came from.
 
-## Why the sync deploys itself
+## How the commit reaches the live site
 
-A commit pushed with `GITHUB_TOKEN` never triggers another workflow —
-that is GitHub's guard against recursive runs. So the bot's
-`chore(site): sync release version …` commit on `main` will **not** fire
-the site's push-to-main `deploy.yml`. If the sync did not deploy, the
-repository would carry the new version and the live site would not. The
-deploy step inside `site-release-version.yml` is what closes that gap;
-`site-deploy.yml` covers every human merge.
+The sites deploy through **Cloudflare Workers Builds** (Git integration):
+Cloudflare's GitHub App is installed on each site repository, watches
+`main`, and runs `npx wrangler deploy` on every push. No deploy step
+lives in GitHub Actions and no Cloudflare credential lives in GitHub.
+
+That still works for the bot's commit. A commit pushed with
+`GITHUB_TOKEN` never triggers another **workflow** — GitHub's guard
+against recursive runs — so nothing in `.github/workflows` of the site
+will fire for `chore(site): sync release version …`. But the guard
+suppresses workflow triggers only. The push webhook still goes out to
+every app and integration subscribed to the repository, Cloudflare's
+GitHub App included, so Workers Builds picks the commit up like any
+other. The sync commits; Cloudflare deploys.
+
+`just deploy` in each site repository remains as the manual path — a
+local `npx wrangler deploy` for when Cloudflare's build is broken or a
+change has to go out without a merge.
 
 ## Consumer
 
-Two files in the site repository. The version sync, hourly:
+One file in the site repository, run hourly:
 
 ```yaml
 name: Release version
@@ -63,56 +69,28 @@ jobs:
     with:
       repo: privacykey/privacycommand
       tags: app=v*
-    secrets: inherit
 ```
 
-And the deploy on merge:
+No `secrets:` block: the workflow needs nothing beyond the job's own
+`GITHUB_TOKEN`, which `permissions: contents: write` grants.
 
-```yaml
-name: Deploy
-on:
-  push:
-    branches: [main]
-    paths-ignore: ['.github/**', '*.md']
-  workflow_dispatch:
-concurrency:
-  group: deploy
-  cancel-in-progress: false
-permissions:
-  contents: read
-jobs:
-  deploy:
-    uses: privacykey/gh-workflows/.github/workflows/site-deploy.yml@v1
-    secrets: inherit
-```
-
-`secrets: inherit` is what lets the reusable workflow see
-`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` when they are
-organisation secrets; without them both workflows still succeed and print
-a `::notice` saying the deploy was skipped.
-
-The `push` trigger on the sync, limited to its own file, means an edit to
+The `push` trigger, limited to the workflow's own file, means an edit to
 the caller is exercised once against real input when it lands. The `17`
 in the cron is deliberate: on-the-hour schedules queue behind everyone
 else's.
 
 ### `.assetsignore`
 
-Both workflows check this repository out into `.gh-workflows/` inside the
+The workflow checks this repository out into `.gh-workflows/` inside the
 site checkout — a local composite action has to live under the workspace,
-there is no other place to put it. The site's `.assetsignore` must
-therefore contain:
-
-```
-.gh-workflows/
-```
-
-or wrangler's `--assets .` uploads the action source as part of the site.
-While there, list `.git/` too: wrangler has no default excludes — the
-asset walker is a plain recursive `readdir` filtered only by
-`.assetsignore` — so a deploy from any clone uploads the `.git` directory
-unless it is listed. The commit step stages `version.json` and modified
-tracked files only, so `.gh-workflows/` never reaches the commit either.
+there is no other place to put it. The commit step stages `version.json`
+and modified tracked files only, so `.gh-workflows/` never reaches the
+commit, and Cloudflare builds from the commit, not from the runner's
+working tree. The site's `.assetsignore` lists `.gh-workflows/` anyway,
+as a belt-and-braces measure, alongside `.git/`: wrangler has no default
+excludes — the asset walker is a plain recursive `readdir` filtered only
+by `.assetsignore` — so a deploy from a local clone uploads the `.git`
+directory unless it is listed.
 
 ### Inputs of `site-release-version.yml`
 
@@ -121,10 +99,8 @@ tracked files only, so `.gh-workflows/` never reaches the commit either.
 | `repo` | — | `owner/name` of the product repository to read releases from |
 | `tags` | `app=v*` | Comma-separated `NAME=GLOB`. One entry per independently versioned component; the version is the tag minus the glob's literal prefix |
 | `include-prereleases` | `false` | Let a prerelease win when it is the newest match |
-| `deploy` | `true` | Deploy after a change or on dispatch. `false` stops after the commit |
 
-Secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, both optional.
-`site-deploy.yml` takes no inputs and the same two optional secrets.
+No secrets.
 
 ## Markers
 
@@ -177,21 +153,15 @@ when a release does.
 Components without a matching release are absent from `components`.
 Order follows the `tags` input.
 
-## Cloudflare secrets
+## Cloudflare side
 
-Organisation secrets, scoped to the website repositories only:
-
-| Secret | Value |
-|---|---|
-| `CLOUDFLARE_API_TOKEN` | An API token with **Account → Workers Scripts → Edit** and **Account → Account Settings → Read**, restricted to the one account |
-| `CLOUDFLARE_ACCOUNT_ID` | The account id from the Cloudflare dashboard sidebar |
-
-Both names are what wrangler reads from the environment, which is why
-`actions/site-deploy` sets exactly those and otherwise just runs the
-site's `just deploy` recipe. Until they exist, every run ends with
-`Cloudflare secrets not set — skipped deploy; run just deploy locally`
-and a green tick: the version commit still lands, the site is deployed
-by hand.
+Each site repository carries a `wrangler.jsonc` naming its Worker, with
+`assets.directory` at the repository root, and is connected in the
+Cloudflare dashboard: Workers & Pages → the Worker → Settings → Builds →
+Connect to Git — production branch `main`, no build command, deploy
+command `npx wrangler deploy`, root `/`. Wrangler reads the name and the
+assets directory from the config, so the deploy command takes no flags.
+Nothing about Cloudflare is configured in GitHub.
 
 ## Things to know
 
@@ -208,20 +178,14 @@ by hand.
 - **Nothing is written on API failure.** A non-200 from the releases
   endpoint, including an exhausted rate limit, fails the sync before the
   first file is touched; the previous values stay in place.
-- **Deploy never runs on an unchanged scheduled run.** Only a change or a
-  manual dispatch deploys, so an hourly schedule costs one API call and
-  a few seconds of runner time.
+- **An unchanged run costs one API call** and a few seconds of runner
+  time; nothing is committed, so Cloudflare builds nothing.
 
 ## Release ordering
 
-A new consumer needs the workflow and the actions on a tag before its
-`@v1` pin resolves. The order is:
+A consumer gets a change here only when `v1` moves. The order is:
 
 1. Merge here, to `main`.
-2. Tag the next minor (`v1.5.0`, since two workflows and two actions are
-   new) and move `v1` to the same commit.
-3. Merge the site pull requests that call `site-release-version.yml@v1`
-   and `site-deploy.yml@v1`. Their first scheduled run is at most an hour
-   away; dispatch by hand to see it sooner.
-4. Add the two Cloudflare secrets when ready. Nothing needs to change in
-   any workflow; the next changed run deploys.
+2. Tag the next version and move `v1` to the same commit.
+3. Merge the site pull requests. Their first scheduled run is at most an
+   hour away; dispatch by hand to see it sooner.
