@@ -1,0 +1,89 @@
+name: Site deploy
+
+# Deploys a static site with its own `just deploy` recipe, using Cloudflare
+# credentials from the caller's secrets. Meant for the ordinary path — a
+# merge to main — while site-release-version.yml covers the commits the
+# version sync makes itself (those never trigger a push workflow).
+#
+# Without CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID the job succeeds and
+# prints a ::notice instead of deploying, so a site can carry this workflow
+# before the token exists.
+#
+# Caller:
+#   on:
+#     push:
+#       branches: [main]
+#       paths-ignore: ['.github/**', '*.md']
+#     workflow_dispatch:
+#   jobs:
+#     deploy:
+#       uses: privacykey/gh-workflows/.github/workflows/site-deploy.yml@v1
+#       secrets: inherit
+
+on:
+  workflow_call:
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        description: 'Cloudflare API token (Workers Scripts:Edit). Optional: absent means no deploy.'
+        required: false
+      CLOUDFLARE_ACCOUNT_ID:
+        description: 'Cloudflare account id. Optional: absent means no deploy.'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # secrets is not allowed in a job-level `if`; it is in job-level `env`.
+      HAS_CF: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+    steps:
+      - name: Check out the site
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # job.workflow_sha is the commit this workflow file was taken from — the
+      # documented way for a reusable workflow to fetch its own repository.
+      # It is read through toJSON(job) because actionlint 1.7.12 does not know
+      # the property yet (rhysd/actionlint#707); `just lint` must stay clean.
+      # Falls back to v1 if the property is missing.
+      - name: Locate the shared actions
+        if: env.HAS_CF == 'true'
+        id: shared
+        env:
+          JOB_JSON: ${{ toJSON(job) }}
+        run: |
+          set -euo pipefail
+          repo=$(jq -r '.workflow_repository // empty' <<<"${JOB_JSON}")
+          sha=$(jq -r '.workflow_sha // empty' <<<"${JOB_JSON}")
+          if [ "${repo}" = "privacykey/gh-workflows" ] && [ -n "${sha}" ]; then
+            echo "ref=${sha}" >> "${GITHUB_OUTPUT}"
+            echo "Shared actions: privacykey/gh-workflows@${sha} (same commit as this workflow)"
+          else
+            echo "ref=v1" >> "${GITHUB_OUTPUT}"
+            echo "::notice::job.workflow_sha not available — shared actions resolved at privacykey/gh-workflows@v1"
+          fi
+
+      # Into a path the caller's .assetsignore lists so wrangler never uploads it.
+      - name: Check out the shared actions
+        if: env.HAS_CF == 'true'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: privacykey/gh-workflows
+          ref: ${{ steps.shared.outputs.ref }}
+          path: .gh-workflows
+          sparse-checkout: actions/site-deploy
+
+      - name: Deploy
+        if: env.HAS_CF == 'true'
+        uses: ./.gh-workflows/actions/site-deploy
+        with:
+          api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Deploy skipped
+        if: env.HAS_CF != 'true'
+        run: echo "::notice::Cloudflare secrets not set — skipped deploy; run \`just deploy\` locally"
