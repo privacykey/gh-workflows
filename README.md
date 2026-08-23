@@ -52,7 +52,7 @@ The other four are private and are not linked here. Between them they use
 `ios-release.yml@v1` (one repo) and `assert-trusted-runner@v1` (all four —
 across nine workflows in total, since one repo calls the guard from six).
 
-Four website repositories — [website](https://github.com/privacykey/website),
+Four website repositories — [website-privacykey](https://github.com/privacykey/website-privacykey),
 [website-mantis](https://github.com/privacykey/website-mantis),
 [website-privacycommand](https://github.com/privacykey/website-privacycommand)
 and [website-privacytracker](https://github.com/privacykey/website-privacytracker)
