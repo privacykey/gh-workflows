@@ -3,23 +3,20 @@ name: Site release version
 # Keeps a static site's displayed product version in step with the product
 # repository's GitHub Releases: reads the latest releases, writes
 # version.json at the site root, rewrites the release markers in the HTML,
-# commits only when something changed, and deploys the result itself.
+# and commits only when something changed. Then it stops.
 #
-# It deploys itself because it has to. A commit pushed with the workflow's
-# own GITHUB_TOKEN never triggers another workflow — GitHub's recursion
-# guard — so the site's push-to-main deploy will not fire for the bot's
-# commit. The deploy step here is what gets the new version on the air.
-# It runs only when the sync changed something, or when the workflow was
-# dispatched by hand; an unchanged scheduled run ends after the sync.
-#
-# Without CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID the commit still
-# lands and the deploy is skipped with a ::notice, so the workflow is safe
-# to enable before the Cloudflare side is set up.
+# The commit still reaches the live site. The sites deploy through
+# Cloudflare Workers Builds (Git integration): Cloudflare's GitHub App
+# receives the push webhook for the bot's commit and runs `npx wrangler
+# deploy`. GitHub's recursion guard — a commit pushed with GITHUB_TOKEN
+# never triggers another *workflow* — suppresses workflow triggers only,
+# not external webhooks, so no deploy step is needed here and no
+# Cloudflare credential ever reaches GitHub.
 #
 # The caller's checkout is at github.ref, so on a schedule the commit lands
 # on the default branch and on a manual dispatch on whichever branch was
-# picked. The composite actions come from a second checkout of this repo
-# at github.job_workflow_sha — the exact commit this workflow file was taken
+# picked. The composite action comes from a second checkout of this repo
+# at job.workflow_sha — the exact commit this workflow file was taken
 # from — into .gh-workflows/, which the caller's .assetsignore must list
 # (see docs/site-release-version.md). Only version.json and tracked files
 # are ever staged, so that checkout cannot leak into the commit.
@@ -36,7 +33,6 @@ name: Site release version
 #       uses: privacykey/gh-workflows/.github/workflows/site-release-version.yml@v1
 #       with:
 #         repo: privacykey/privacycommand
-#       secrets: inherit
 
 on:
   workflow_call:
@@ -58,35 +54,15 @@ on:
         type: boolean
         required: false
         default: false
-      deploy:
-        description: >-
-          Deploy after a change (or on manual dispatch). Set false to let the
-          sync commit and stop — useful while the Cloudflare secrets are not
-          yet in place, although the deploy step already skips itself then.
-        type: boolean
-        required: false
-        default: true
-    secrets:
-      CLOUDFLARE_API_TOKEN:
-        description: 'Cloudflare API token (Workers Scripts:Edit). Optional: absent means no deploy.'
-        required: false
-      CLOUDFLARE_ACCOUNT_ID:
-        description: 'Cloudflare account id. Optional: absent means no deploy.'
-        required: false
 
 permissions:
   contents: write
 
 jobs:
   sync:
-    name: Sync and deploy
+    name: Sync
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    env:
-      # The secrets context is not allowed in a job-level `if`, but it is in
-      # job-level `env`, so the presence check is made here and the steps
-      # test the env var.
-      HAS_CF: ${{ secrets.CLOUDFLARE_API_TOKEN != '' && secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
     steps:
       - name: Check out the site
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -120,9 +96,7 @@ jobs:
           repository: privacykey/gh-workflows
           ref: ${{ steps.shared.outputs.ref }}
           path: .gh-workflows
-          sparse-checkout: |
-            actions/site-release-version
-            actions/site-deploy
+          sparse-checkout: actions/site-release-version
 
       - name: Sync release version
         id: sync
@@ -149,18 +123,4 @@ jobs:
           git add version.json
           git commit -m "chore(site): sync release version from ${REPO} (${TAGS})"
           git push origin "HEAD:${GITHUB_REF}"
-
-      - name: Deploy
-        if: >-
-          inputs.deploy && env.HAS_CF == 'true'
-          && (steps.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch')
-        uses: ./.gh-workflows/actions/site-deploy
-        with:
-          api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
-      - name: Deploy skipped
-        if: >-
-          inputs.deploy && env.HAS_CF != 'true'
-          && (steps.sync.outputs.changed == 'true' || github.event_name == 'workflow_dispatch')
-        run: echo "::notice::Cloudflare secrets not set — skipped deploy; run \`just deploy\` locally"
+          echo "Pushed. Cloudflare Workers Builds deploys this commit from the push webhook."
