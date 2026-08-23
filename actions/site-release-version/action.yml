@@ -1,0 +1,82 @@
+name: 'Sync the displayed release version of a site'
+description: >-
+  Reads a product repository's GitHub Releases, writes `version.json` at the
+  site root and rewrites the release markers in every *.html under the site
+  directory. The commit, push and deploy are left to the caller — normally
+  the `site-release-version.yml` reusable workflow.
+
+  Markers (attribute order does not matter):
+    <span data-release="NAME">v0.1.5</span>         inner text → "v" + version
+    <a data-release-link="NAME" href="…">           href → release page
+    <time data-release-date="NAME" datetime="…">    datetime + "8 Aug 2026"
+
+  NAME comes from the `tags` input. A component with no matching release
+  is reported with a ::notice and its markup is left untouched; a marker
+  whose NAME is not in `tags` is reported the same way. A second run on
+  the same input changes nothing, so `changed` is a real signal.
+
+  The GitHub API call happens before anything is written; a non-200 (or
+  an exhausted rate limit) fails the step with nothing modified.
+
+  Requirements on the calling job:
+    • python3 on PATH (preinstalled on every GitHub-hosted runner; the
+      script is standard-library only, so there is nothing to install)
+    • a token that can read the product repo's releases — the built-in
+      `github.token` is enough for a public repository.
+
+inputs:
+  repo:
+    description: 'owner/name of the product repository whose releases to read.'
+    required: true
+  tags:
+    description: >-
+      Comma-separated NAME=GLOB list mapping a marker name to a tag pattern.
+      The version is the tag with the glob's literal prefix (everything
+      before the first "*") stripped, so `app=v*` turns v0.1.5 into 0.1.5
+      and `cli=cli-v*` turns cli-v0.2.0 into 0.2.0. One entry per
+      independently versioned component.
+    required: false
+    default: 'app=v*'
+  include-prereleases:
+    description: 'Let a prerelease win when it is the newest match.'
+    required: false
+    default: 'false'
+  site-dir:
+    description: 'Directory holding the site (version.json is written here).'
+    required: false
+    default: '.'
+  token:
+    description: 'Token for the GitHub API. Defaults to the workflow token.'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  changed:
+    description: '"true" if any file was written, else "false".'
+    value: ${{ steps.sync.outputs.changed }}
+  tags:
+    description: 'Tags that resolved, comma-separated in `tags` order (e.g. "cli-v0.2.0").'
+    value: ${{ steps.sync.outputs.tags }}
+  files:
+    description: 'Files written, comma-separated, relative to site-dir.'
+    value: ${{ steps.sync.outputs.files }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Sync release version into the site
+      id: sync
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        REPO: ${{ inputs.repo }}
+        TAGS: ${{ inputs.tags }}
+        INCLUDE_PRERELEASES: ${{ inputs.include-prereleases }}
+        SITE_DIR: ${{ inputs.site-dir }}
+      run: |
+        set -euo pipefail
+        python3 "${{ github.action_path }}/sync.py" \
+          --repo "${REPO}" \
+          --tags "${TAGS}" \
+          --include-prereleases "${INCLUDE_PRERELEASES}" \
+          --site-dir "${SITE_DIR}"

@@ -1,8 +1,8 @@
 # gh-workflows
 
 Reusable GitHub Actions workflows and composite actions for the macOS and iOS
-app repositories across my privacykey and AdamXweb accounts. One pipeline, one
-place to fix it.
+app repositories — and the static sites that describe them — across my
+privacykey and AdamXweb accounts. One pipeline, one place to fix it.
 
 [![Project status](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fprivacykey%2F.github%2Fmain%2Fbadges%2Fgh-workflows.json)](https://github.com/privacykey/.github/blob/main/STATUS.md#gh-workflows) [![Licence](https://img.shields.io/github/license/privacykey/gh-workflows?label=licence)](LICENSE)
 
@@ -26,12 +26,16 @@ consumer needs something new, or when a pin needs bumping.
 | `.github/workflows/macos-app-ci.yml` | Push/PR CI for macOS apps: unsigned build + tests, zero secrets |
 | `.github/workflows/ios-release.yml` | iOS archive/TestFlight: unsigned validate gate → signed archive → .ipa + dSYM artefacts → optional `altool` upload; two signing modes (self-hosted runner keychain, or hosted cert import) |
 | `.github/workflows/project-status.yml` | Regenerates one account's status badges, `STATUS.md` and profile section from its own `status.json`, then reports what has drifted |
+| `.github/workflows/site-release-version.yml` | Hourly: reads a product repo's GitHub Releases, writes `version.json` and rewrites the release markers in a static site, commits on change, deploys itself (the bot's commit cannot trigger a push workflow) |
+| `.github/workflows/site-deploy.yml` | Push-to-main deploy for a static site via its own `just deploy`; skips with a notice when the Cloudflare secrets are absent |
 | `actions/assert-trusted-runner` | Fail-closed guard: on a self-hosted runner, refuses to continue unless the repository is private and the pull request is not from a fork |
 | `actions/setup-apple-keychain` | Ephemeral keychain + certificate import (`-T codesign`, `set-key-partition-list`, masked password) |
 | `actions/write-asc-api-key` | Stages the App Store Connect `.p8` as a mode-600 file |
 | `actions/install-sparkle-cli` | Pinned Sparkle release tarball with SHA-256 verification |
 | `actions/publish-gh-pages-file` | Worktree-based single-file publish to a branch (appcast.xml → gh-pages) |
 | `actions/project-status` | The Node scripts and canonical tier definitions behind `project-status.yml` |
+| `actions/site-release-version` | The stdlib-only Python behind `site-release-version.yml`: release lookup, `version.json`, marker rewrite, `changed` output |
+| `actions/site-deploy` | Pinned `just` + `just deploy` with `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` in the environment |
 
 ## What consumes this
 
@@ -47,6 +51,13 @@ public ones:
 The other four are private and are not linked here. Between them they use
 `ios-release.yml@v1` (one repo) and `assert-trusted-runner@v1` (all four —
 across nine workflows in total, since one repo calls the guard from six).
+
+Four website repositories — [website-privacykey](https://github.com/privacykey/website-privacykey),
+[website-mantis](https://github.com/privacykey/website-mantis),
+[website-privacycommand](https://github.com/privacykey/website-privacycommand)
+and [website-privacytracker](https://github.com/privacykey/website-privacytracker)
+— call `site-deploy.yml@v1`, and all but the hub call
+`site-release-version.yml@v1` as well, once `v1` carries them.
 
 ## How a consumer uses it
 
@@ -96,6 +107,18 @@ caller's context, which has no environment, and come back empty.
       secrets:
         status-token: ${{ secrets.STATUS_TOKEN }}
   ```
+- **Static sites** — the release-version sync, the markers it rewrites,
+  the `version.json` schema, the Cloudflare secrets and why the sync has
+  to deploy itself: [docs/site-release-version.md](docs/site-release-version.md).
+
+  ```yaml
+  jobs:
+    sync:
+      uses: privacykey/gh-workflows/.github/workflows/site-release-version.yml@v1
+      with:
+        repo: privacykey/privacycommand
+      secrets: inherit
+  ```
 
 ## The version contract
 
@@ -111,14 +134,18 @@ caller's context, which has no environment, and come back empty.
   *workflow* was pinned at. A caller on `v1.1.0` therefore gets that
   workflow, but whatever `v1` currently points at for the actions it calls.
   A relative path cannot be used instead, because the job's checkout is the
-  consumer repo, not this one.
+  consumer repo, not this one. The two site workflows are the exception:
+  they check this repository out at `job.workflow_sha` — the commit the
+  workflow file itself came from — and run the actions from that path,
+  so for them an exact pin is a full freeze.
 - **Third-party actions are SHA-pinned** with a version comment — currently
   `actions/checkout`, `actions/upload-artifact`, `maxim-lobanov/setup-xcode`,
   `softprops/action-gh-release` and `ruby/setup-ruby`. The digests live in
   the workflow files rather than being repeated here, so they cannot drift
   out of sync with what actually runs. `project-status.yml` is the exception:
   it runs on `ubuntu-latest` and uses floating `actions/checkout@v4` /
-  `actions/setup-node@v4`.
+  `actions/setup-node@v4`. `actions/site-deploy` adds `extractions/setup-just`
+  to the pinned list.
 - **The Sparkle CLI** is pinned to version `2.9.5`, and its tarball digest is
   verified before extraction. Bump the `sparkle_version` and `sparkle_sha256`
   inputs together or the check fails, by design.
