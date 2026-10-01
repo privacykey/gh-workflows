@@ -252,6 +252,7 @@ on:
 # Least privilege by default; only the release job opts up to write.
 permissions:
   contents: read
+  checks: read
 
 # One release pipeline per ref. cancel-in-progress stays false: killing a
 # half-published release (Release created, appcast not yet pushed) is worse
@@ -450,6 +451,7 @@ jobs:
     permissions:
       # Publishes the Release, pushes the appcast branch.
       contents: write
+      checks: read
 
     steps:
       # This job holds the signing identity and a push-capable token, so
@@ -643,6 +645,7 @@ jobs:
           KEYCHAIN_PATH: ${{ steps.keychain.outputs.keychain-path }}
           SCHEME: ${{ inputs.scheme }}
           RELEASE_SCRIPT: ${{ inputs.release_script }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           "${RELEASE_SCRIPT}"
@@ -776,6 +779,17 @@ jobs:
             fi
             echo 'ASSETS_EOF'
           } >> "$GITHUB_OUTPUT"
+
+      - name: Verify project package before publication
+        shell: bash
+        env:
+          DMG: ${{ steps.dmg.outputs.dmg-path }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ -f .project/commands.json ]]; then
+            python3 .project/projectctl.py artifact-verify "$DMG" --channel release
+          fi
 
       - name: Attach assets to GitHub Release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2

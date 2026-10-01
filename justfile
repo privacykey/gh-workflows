@@ -12,3 +12,4 @@ lint:
 [group("dev")]
 test:
     python3 tests/test_apple_provenance.py
+    python3 tests/test_project_publication.py
