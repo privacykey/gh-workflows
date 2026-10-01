@@ -1,0 +1,11 @@
+name: Verify cleanup post-action order
+description: Contract test fixture; checks output before or after cleanup.
+inputs:
+  stage:
+    description: before-cleanup or after-cleanup
+    required: true
+runs:
+  using: node24
+  main: main.js
+  post: post.js
+  post-if: always()

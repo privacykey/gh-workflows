@@ -28,3 +28,8 @@ jobs:
         run: |
           python3 tests/test_apple_provenance.py
           python3 tests/test_project_publication.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify scoped output and simulator cleanup
+        run: node --test tests/test_cleanup_job.js

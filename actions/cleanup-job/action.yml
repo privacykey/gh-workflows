@@ -1,0 +1,23 @@
+name: Clean disposable job output
+description: Remove declared workspace output and owned simulators after artifact and cache post-actions.
+inputs:
+  paths:
+    description: Newline-separated generated paths relative to github.workspace. Source, archives and exports should not be listed.
+    required: false
+    default: .ci-derived-data
+  simulators:
+    description: Enable cleanup of devices created with the exported CI_SIMULATOR_NAME_PREFIX (including test clones).
+    required: false
+    default: 'false'
+  instance:
+    description: Matrix job index; pass strategy.job-index for a matrix job.
+    required: false
+    default: '0'
+outputs:
+  simulator-name:
+    description: Unique name prefix for simulators owned by this run, attempt and job.
+runs:
+  using: node24
+  main: main.js
+  post: post.js
+  post-if: always()
