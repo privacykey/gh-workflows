@@ -425,7 +425,7 @@ jobs:
             -scheme "${SCHEME}" \
             -configuration Debug \
             -destination 'platform=macOS' \
-              -derivedDataPath "$CI_DERIVED_DATA" \
+            -derivedDataPath "$CI_DERIVED_DATA" \
             CODE_SIGNING_ALLOWED=NO
 
       - name: Unsigned Release build
