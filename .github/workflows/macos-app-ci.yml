@@ -123,6 +123,40 @@ jobs:
           # what wipes it.
           clean: true
 
+          fetch-depth: 0
+      - name: Report checked-out source
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          branch="$(git rev-parse --abbrev-ref HEAD)"
+          dirty=NO
+          if [[ -n "$(git status --porcelain)" ]]; then dirty=YES; fi
+          tagged=NO
+          if git tag --points-at HEAD | grep -Eq '^v[0-9]+(\.[0-9]+){1,2}$'; then tagged=YES; fi
+          if [[ -n "${RELEASE_TAG:-}" ]]; then
+            if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+(\.[0-9]+){1,2}$ ]]; then
+              echo "::error::Release tag must be a marketing-version tag, such as v1.2.3."
+              exit 1
+            fi
+            expected="$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")"
+            if [[ "$sha" != "$expected" ]]; then
+              echo "::error::Checked-out commit does not match the requested release tag."
+              exit 1
+            fi
+          fi
+          printf 'Checkout provenance: commit=%s branch=%s dirty=%s version-tag-at-HEAD=%s\n' "$sha" "$branch" "$dirty" "$tagged"
+          printf 'Workflow trigger: event=%s ref=%s\n' "${GITHUB_EVENT_NAME:-local}" "${GITHUB_REF:-unknown}"
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            {
+              echo '### Source at checkout'
+              # shellcheck disable=SC2016 # Backticks are Markdown, not shell substitutions.
+          printf '\nCommit: `%s` · branch: `%s` · dirty: **%s** · version tag at HEAD: **%s**\n' "$sha" "$branch" "$dirty" "$tagged"
+              # shellcheck disable=SC2016 # Backticks are Markdown.
+            printf '\nTrigger: `%s` · ref: `%s`\n' "${GITHUB_EVENT_NAME:-local}" "${GITHUB_REF:-unknown}"
+            echo 'Build-time state and the UTC artifact stamp are recorded separately in the app build logs.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Select Xcode
         # Hosted images only. setup-xcode changes the machine's selected
         # Xcode globally, which on a shared self-hosted host would reach

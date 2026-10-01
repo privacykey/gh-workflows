@@ -327,6 +327,43 @@ jobs:
           # left behind; this is what wipes it.
           clean: true
 
+          fetch-depth: 0
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+      - name: Report checked-out source
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          branch="$(git rev-parse --abbrev-ref HEAD)"
+          dirty=NO
+          if [[ -n "$(git status --porcelain)" ]]; then dirty=YES; fi
+          tagged=NO
+          if git tag --points-at HEAD | grep -Eq '^v[0-9]+(\.[0-9]+){1,2}$'; then tagged=YES; fi
+          if [[ -n "${RELEASE_TAG:-}" ]]; then
+            if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+(\.[0-9]+){1,2}$ ]]; then
+              echo "::error::Release tag must be a marketing-version tag, such as v1.2.3."
+              exit 1
+            fi
+            expected="$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")"
+            if [[ "$sha" != "$expected" ]]; then
+              echo "::error::Checked-out commit does not match the requested release tag."
+              exit 1
+            fi
+          fi
+          printf 'Checkout provenance: commit=%s branch=%s dirty=%s version-tag-at-HEAD=%s\n' "$sha" "$branch" "$dirty" "$tagged"
+          printf 'Workflow trigger: event=%s ref=%s\n' "${GITHUB_EVENT_NAME:-local}" "${GITHUB_REF:-unknown}"
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            {
+              echo '### Source at checkout'
+              # shellcheck disable=SC2016 # Backticks are Markdown, not shell substitutions.
+          printf '\nCommit: `%s` · branch: `%s` · dirty: **%s** · version tag at HEAD: **%s**\n' "$sha" "$branch" "$dirty" "$tagged"
+              # shellcheck disable=SC2016 # Backticks are Markdown.
+            printf '\nTrigger: `%s` · ref: `%s`\n' "${GITHUB_EVENT_NAME:-local}" "${GITHUB_REF:-unknown}"
+            echo 'Build-time state and the UTC artifact stamp are recorded separately in the app build logs.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
       - name: Select Xcode
         # latest-stable rather than a hard version pin: the project format
         # is forward-compatible, and this picks up Xcode security fixes
@@ -423,8 +460,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          # Full history: the release scripts derive CFBundleVersion from
-          # `git rev-list --count HEAD`.
+          # Full history and tags identify the exact source; numbering belongs to the app.
           fetch-depth: 0
           # Deliberately NOT persist-credentials: false — this checkout's
           # credentials push the appcast branch (publish-gh-pages-file).
@@ -435,6 +471,42 @@ jobs:
           # runs next on the same machine.
           clean: true
 
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+      - name: Report checked-out source
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          branch="$(git rev-parse --abbrev-ref HEAD)"
+          dirty=NO
+          if [[ -n "$(git status --porcelain)" ]]; then dirty=YES; fi
+          tagged=NO
+          if git tag --points-at HEAD | grep -Eq '^v[0-9]+(\.[0-9]+){1,2}$'; then tagged=YES; fi
+          if [[ -n "${RELEASE_TAG:-}" ]]; then
+            if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+(\.[0-9]+){1,2}$ ]]; then
+              echo "::error::Release tag must be a marketing-version tag, such as v1.2.3."
+              exit 1
+            fi
+            expected="$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")"
+            if [[ "$sha" != "$expected" ]]; then
+              echo "::error::Checked-out commit does not match the requested release tag."
+              exit 1
+            fi
+          fi
+          printf 'Checkout provenance: commit=%s branch=%s dirty=%s version-tag-at-HEAD=%s\n' "$sha" "$branch" "$dirty" "$tagged"
+          printf 'Workflow trigger: event=%s ref=%s\n' "${GITHUB_EVENT_NAME:-local}" "${GITHUB_REF:-unknown}"
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            {
+              echo '### Source at checkout'
+              # shellcheck disable=SC2016 # Backticks are Markdown, not shell substitutions.
+          printf '\nCommit: `%s` · branch: `%s` · dirty: **%s** · version tag at HEAD: **%s**\n' "$sha" "$branch" "$dirty" "$tagged"
+              # shellcheck disable=SC2016 # Backticks are Markdown.
+            printf '\nTrigger: `%s` · ref: `%s`\n' "${GITHUB_EVENT_NAME:-local}" "${GITHUB_REF:-unknown}"
+            echo 'Build-time state and the UTC artifact stamp are recorded separately in the app build logs.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
       - name: Select Xcode
         if: runner.environment == 'github-hosted'
         uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
@@ -493,6 +565,7 @@ jobs:
             echo "::error::could not read CFBundleShortVersionString from ${VERSION_PLIST}"
             exit 1
           fi
+          # shellcheck disable=SC2016 # Match the literal Xcode placeholder.
           if [[ "${PLIST_VERSION}" == *'$('* ]]; then
             echo "::error::${VERSION_PLIST} holds the build-time placeholder ${PLIST_VERSION}, which cannot be compared to a tag."
             echo "::error::Point version_plist at a plist with a literal version, or leave it empty to skip this check."
