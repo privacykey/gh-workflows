@@ -357,6 +357,7 @@ on:
 # This workflow never pushes; nothing here needs more than read.
 permissions:
   contents: read
+  checks: read
 
 # One release pipeline per ref; a half-done archive/upload should finish,
 # not be cancelled. NOTE: GitHub evaluates workflow-level concurrency of a
@@ -700,6 +701,20 @@ jobs:
             echo 'Build-time state and the UTC artifact stamp are recorded separately in the app build logs.'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
+      - name: Capture original project source
+        shell: bash
+        env:
+          PUBLISH: ${{ inputs.upload_to_testflight }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ -f .project/commands.json ]]; then
+            if [[ "$PUBLISH" == "true" ]]; then
+              python3 .project/projectctl.py source-check --channel testflight
+            fi
+            python3 .project/projectctl.py source-capture "$RUNNER_TEMP/project-source.json"
+          fi
+
       - name: Point at the runner's Xcode
         if: inputs.signing == 'runner-keychain'
         env:
@@ -984,6 +999,24 @@ jobs:
           fi
           echo "ipa-path=${ipa}" >> "$GITHUB_OUTPUT"
           echo "Exported: ${ipa}"
+
+      - name: Record and verify the original archive and export
+        shell: bash
+        env:
+          SCHEME: ${{ inputs.scheme }}
+          IPA: ${{ steps.ipa.outputs.ipa-path }}
+          PUBLISH: ${{ inputs.upload_to_testflight }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ -f .project/commands.json ]]; then
+            python3 .project/projectctl.py record-artifact "build/$SCHEME.xcarchive" --source-record "$RUNNER_TEMP/project-source.json"
+            python3 .project/projectctl.py record-artifact "$IPA" --source-record "$RUNNER_TEMP/project-source.json"
+            channel=local
+            if [[ "$PUBLISH" == "true" ]]; then channel=testflight; fi
+            python3 .project/projectctl.py artifact-verify "build/$SCHEME.xcarchive" --channel "$channel"
+            python3 .project/projectctl.py artifact-verify "$IPA" --channel "$channel"
+          fi
 
       - name: Zip dSYMs
         # dSYMs live inside the xcarchive. uploadSymbols: true also sends

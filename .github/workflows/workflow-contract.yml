@@ -1,0 +1,30 @@
+name: Reusable workflow contract
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  contract:
+    name: Workflow contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install YAML parser
+        run: python3 -m pip install PyYAML==6.0.3
+      - name: Parse every workflow and action
+        run: |
+          python3 - <<'PY'
+          import pathlib, yaml
+          for root in ['.github/workflows', 'actions']:
+              for path in pathlib.Path(root).rglob('*.yml'):
+                  yaml.safe_load(path.read_text())
+          PY
+      - name: Verify exact source and publication gates
+        run: |
+          python3 tests/test_apple_provenance.py
+          python3 tests/test_project_publication.py
