@@ -157,7 +157,7 @@ for consumers, because both their pins and this repo's internal action
 references resolve through tags. So merge to `main` freely, then move `v1` as
 a separate, deliberate act once you are satisfied. Before that:
 
-- Run `just lint` — `actionlint` over the workflows plus a YAML parse of
+- Run `just test` for checkout/tag selection, then `just lint` — `actionlint` over the workflows plus a YAML parse of
   every `actions/*/action.yml`. `actionlint` has to be installed locally,
   because there is no CI in this repository: every workflow here is
   `workflow_call`-only, so none of them can run on a push.
@@ -174,3 +174,22 @@ a separate, deliberate act once you are satisfied. Before that:
 ## Licence
 
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+## Apple source provenance
+
+Apple build and release jobs fetch full history and tags, then report the exact
+checkout SHA, detached/branch state, dirty flag and version tag at HEAD in their
+logs and job summary. This is the state immediately after checkout. Apps record
+build-time state and their own build number separately; a checkout summary does
+not reserve a build number or replace the app's generator.
+
+For manual macOS releases, `release_tag` selects `refs/tags/<tag>` in both the
+test and signing jobs. The source guard verifies that the checkout actually
+matches that tag before signing. Tags use `vX.Y` or `vX.Y.Z`; a `v1-preview`
+snapshot does not count as a marketing-version release tag. Version matching
+against the app remains an additional release check.
+
+iOS callers offering a signed-archive checkbox must pass `signed_archive`
+explicitly. Its default is true for callers that run only on release events.
+Keep portfolio callers on `build_number: project` so the app supplies the agreed
+`YYYY.MMDD.HHMM` UTC identity.

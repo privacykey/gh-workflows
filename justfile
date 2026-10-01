@@ -7,3 +7,8 @@ default:
 lint:
     actionlint
     for f in actions/*/action.yml; do python3 -c "import sys,yaml; yaml.safe_load(open(sys.argv[1]))" "$f"; done
+
+# Verify Apple workflow source/tag selection with isolated Git fixtures.
+[group("dev")]
+test:
+    python3 tests/test_apple_provenance.py

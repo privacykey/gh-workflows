@@ -388,6 +388,40 @@ jobs:
           # left behind; this is what wipes it.
           clean: true
 
+          fetch-depth: 0
+      - name: Report checked-out source
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          branch="$(git rev-parse --abbrev-ref HEAD)"
+          dirty=NO
+          if [[ -n "$(git status --porcelain)" ]]; then dirty=YES; fi
+          tagged=NO
+          if git tag --points-at HEAD | grep -Eq '^v[0-9]+(\.[0-9]+){1,2}$'; then tagged=YES; fi
+          if [[ -n "${RELEASE_TAG:-}" ]]; then
+            if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+(\.[0-9]+){1,2}$ ]]; then
+              echo "::error::Release tag must be a marketing-version tag, such as v1.2.3."
+              exit 1
+            fi
+            expected="$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")"
+            if [[ "$sha" != "$expected" ]]; then
+              echo "::error::Checked-out commit does not match the requested release tag."
+              exit 1
+            fi
+          fi
+          printf 'Checkout provenance: commit=%s branch=%s dirty=%s version-tag-at-HEAD=%s\n' "$sha" "$branch" "$dirty" "$tagged"
+          printf 'Workflow trigger: event=%s ref=%s\n' "${GITHUB_EVENT_NAME:-local}" "${GITHUB_REF:-unknown}"
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            {
+              echo '### Source at checkout'
+              # shellcheck disable=SC2016 # Backticks are Markdown, not shell substitutions.
+          printf '\nCommit: `%s` · branch: `%s` · dirty: **%s** · version tag at HEAD: **%s**\n' "$sha" "$branch" "$dirty" "$tagged"
+              # shellcheck disable=SC2016 # Backticks are Markdown.
+            printf '\nTrigger: `%s` · ref: `%s`\n' "${GITHUB_EVENT_NAME:-local}" "${GITHUB_REF:-unknown}"
+            echo 'Build-time state and the UTC artifact stamp are recorded separately in the app build logs.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Preflight input validation
         # Pure input logic, up front and in the secret-free job, so a
         # miswired caller fails here — before the ios-signing environment
@@ -626,14 +660,46 @@ jobs:
       - name: Check out source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          # No git history needed: the auto build number is stateless
-          # (minutes since epoch), unlike the macOS pipeline's
-          # rev-list-count scheme. Never pushes either.
+          # Tag refs are needed by app provenance even with stateless numbering.
           persist-credentials: false
           # On a persistent runner the workspace is whatever the last job
           # left behind; this is what wipes it.
           clean: true
 
+          fetch-depth: 0
+      - name: Report checked-out source
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          branch="$(git rev-parse --abbrev-ref HEAD)"
+          dirty=NO
+          if [[ -n "$(git status --porcelain)" ]]; then dirty=YES; fi
+          tagged=NO
+          if git tag --points-at HEAD | grep -Eq '^v[0-9]+(\.[0-9]+){1,2}$'; then tagged=YES; fi
+          if [[ -n "${RELEASE_TAG:-}" ]]; then
+            if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+(\.[0-9]+){1,2}$ ]]; then
+              echo "::error::Release tag must be a marketing-version tag, such as v1.2.3."
+              exit 1
+            fi
+            expected="$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")"
+            if [[ "$sha" != "$expected" ]]; then
+              echo "::error::Checked-out commit does not match the requested release tag."
+              exit 1
+            fi
+          fi
+          printf 'Checkout provenance: commit=%s branch=%s dirty=%s version-tag-at-HEAD=%s\n' "$sha" "$branch" "$dirty" "$tagged"
+          printf 'Workflow trigger: event=%s ref=%s\n' "${GITHUB_EVENT_NAME:-local}" "${GITHUB_REF:-unknown}"
+          if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            {
+              echo '### Source at checkout'
+              # shellcheck disable=SC2016 # Backticks are Markdown, not shell substitutions.
+          printf '\nCommit: `%s` · branch: `%s` · dirty: **%s** · version tag at HEAD: **%s**\n' "$sha" "$branch" "$dirty" "$tagged"
+              # shellcheck disable=SC2016 # Backticks are Markdown.
+            printf '\nTrigger: `%s` · ref: `%s`\n' "${GITHUB_EVENT_NAME:-local}" "${GITHUB_REF:-unknown}"
+            echo 'Build-time state and the UTC artifact stamp are recorded separately in the app build logs.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Point at the runner's Xcode
         if: inputs.signing == 'runner-keychain'
         env:
@@ -909,6 +975,7 @@ jobs:
         id: ipa
         run: |
           set -euo pipefail
+          # shellcheck disable=SC2012 # Fixed export directory and IPA suffix.
           ipa="$(ls build/export/*.ipa 2>/dev/null | head -1 || true)"
           if [[ -z "${ipa}" ]]; then
             echo "::error::no .ipa produced — check the export step output"
