@@ -239,6 +239,16 @@ on:
         type: boolean
         required: false
         default: false
+      cleanup_simulators:
+        description: Remove custom-lane devices named with CI_SIMULATOR_NAME_PREFIX, including interrupted creation and test clones.
+        type: boolean
+        required: false
+        default: false
+      cleanup_paths:
+        description: Additional newline-separated reproducible workspace output; never list archives or exported packages.
+        type: string
+        required: false
+        default: ''
       run_tests:
         description: >-
           Run `xcodebuild test` (Debug, test_destination) in the validate
@@ -379,6 +389,19 @@ jobs:
       # images, which is why it can live in the shared workflow.
       - name: Assert trusted runner context
         uses: privacykey/gh-workflows/actions/assert-trusted-runner@v1
+
+      - name: Register generated-output cleanup
+        id: cleanup
+        uses: privacykey/gh-workflows/actions/cleanup-job@da63a80401b142e6fd084b5d97bc695687d5759b
+        with:
+          paths: |
+            .ci-derived-data
+            build/DerivedData-Release
+            build/DerivedData-Unit
+            build/TestResults
+            .build
+            ${{ inputs.cleanup_paths }}
+          simulators: ${{ inputs.cleanup_simulators }}
 
       - name: Check out source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -658,6 +681,18 @@ jobs:
       - name: Assert trusted runner context
         uses: privacykey/gh-workflows/actions/assert-trusted-runner@v1
 
+      - name: Register generated-output cleanup
+        id: cleanup
+        uses: privacykey/gh-workflows/actions/cleanup-job@da63a80401b142e6fd084b5d97bc695687d5759b
+        with:
+          paths: |
+            .ci-derived-data
+            build/DerivedData-Release
+            build/DerivedData-Unit
+            build/TestResults
+            .build
+            ${{ inputs.cleanup_paths }}
+
       - name: Check out source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -878,6 +913,7 @@ jobs:
             -configuration Release
             -destination 'generic/platform=iOS'
             -archivePath "build/${SCHEME}.xcarchive"
+            -derivedDataPath "$CI_DERIVED_DATA"
             # Automatic signing mints/renews the distribution cert and App
             # Store profiles. runner-keychain mode: authenticated by the
             # runner's signed-in Xcode account.

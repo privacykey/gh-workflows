@@ -274,6 +274,15 @@ jobs:
       - name: Assert trusted runner context
         uses: privacykey/gh-workflows/actions/assert-trusted-runner@v1
 
+      - name: Register generated-output cleanup
+        id: cleanup
+        uses: privacykey/gh-workflows/actions/cleanup-job@da63a80401b142e6fd084b5d97bc695687d5759b
+        with:
+          paths: |
+            .ci-derived-data
+            TestResults.xcresult
+            .build
+
       - name: Preflight input validation
         # Pure input logic, before checkout and long before any secret is
         # read, so a miswired caller fails in seconds with a message about
@@ -416,6 +425,7 @@ jobs:
             -scheme "${SCHEME}" \
             -configuration Debug \
             -destination 'platform=macOS' \
+            -derivedDataPath "$CI_DERIVED_DATA" \
             CODE_SIGNING_ALLOWED=NO
 
       - name: Unsigned Release build
@@ -435,6 +445,7 @@ jobs:
             -scheme "${SCHEME}" \
             -configuration Release \
             -destination 'generic/platform=macOS' \
+            -derivedDataPath "$CI_DERIVED_DATA" \
             CODE_SIGNING_ALLOWED=NO
 
   release:
@@ -458,6 +469,15 @@ jobs:
       # the guard runs before anything is fetched here too.
       - name: Assert trusted runner context
         uses: privacykey/gh-workflows/actions/assert-trusted-runner@v1
+
+      - name: Register generated-output cleanup
+        id: cleanup
+        uses: privacykey/gh-workflows/actions/cleanup-job@da63a80401b142e6fd084b5d97bc695687d5759b
+        with:
+          paths: |
+            .ci-derived-data
+            TestResults.xcresult
+            .build
 
       - name: Check out source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3

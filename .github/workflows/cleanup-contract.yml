@@ -1,0 +1,28 @@
+name: Cleanup post-action contract
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  post-order:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check after all cleanup post-actions
+        uses: privacykey/gh-workflows/tests/actions/post-order@da63a80401b142e6fd084b5d97bc695687d5759b
+        with:
+          stage: after-cleanup
+      - name: Register generated-output cleanup
+        uses: privacykey/gh-workflows/actions/cleanup-job@da63a80401b142e6fd084b5d97bc695687d5759b
+        with:
+          paths: cleanup-fixture
+      - uses: actions/checkout@v4
+      - name: Simulate a cache or artifact post-consumer
+        uses: privacykey/gh-workflows/tests/actions/post-order@da63a80401b142e6fd084b5d97bc695687d5759b
+        with:
+          stage: before-cleanup
+      - name: Produce disposable output
+        run: |
+          mkdir -p cleanup-fixture
+          printf 'cache and artifact input' > cleanup-fixture/cache-output

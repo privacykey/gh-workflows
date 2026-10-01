@@ -113,6 +113,15 @@ jobs:
       - name: Assert trusted runner context
         uses: privacykey/gh-workflows/actions/assert-trusted-runner@v1
 
+      - name: Register generated-output cleanup
+        id: cleanup
+        uses: privacykey/gh-workflows/actions/cleanup-job@da63a80401b142e6fd084b5d97bc695687d5759b
+        with:
+          paths: |
+            .ci-derived-data
+            TestResults.xcresult
+            .build
+
       - name: Check out source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -211,6 +220,7 @@ jobs:
               -scheme "${SCHEME}" \
               -configuration Debug \
               -destination 'platform=macOS' \
+              -derivedDataPath "$CI_DERIVED_DATA" \
               -resultBundlePath TestResults.xcresult \
               CODE_SIGN_IDENTITY="-" \
               CODE_SIGNING_REQUIRED=NO \
